@@ -999,3 +999,195 @@ def build_gated_backbone_bifusion_block_adapter(
         gate_hidden_dim=gate_hidden_dim,
         gate_init_bias=gate_init_bias,
     )
+
+
+class TargetnessAwareSemanticSlotGenerator(nn.Module):
+    """Predict latent semantic slots from SAM image embeddings.
+
+    TASSG is intended to replace cached Qwen/CLIP text features at inference
+    time. During training, its global vector and token slots can be distilled
+    from the cached teacher features.
+    """
+
+    def __init__(
+        self,
+        img_dim: int = 256,
+        text_dim: int = 512,
+        num_slots: int = 8,
+        hidden_dim: int = 256,
+        num_heads: int = 4,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.img_dim = int(img_dim)
+        self.text_dim = int(text_dim)
+        self.num_slots = int(num_slots)
+        self.hidden_dim = int(hidden_dim)
+
+        self.targetness_head = nn.Sequential(
+            nn.Conv2d(self.img_dim, self.hidden_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(self.hidden_dim, 1, kernel_size=1),
+        )
+        nn.init.constant_(self.targetness_head[-1].bias, -4.0)
+
+        self.vis_proj = nn.Linear(self.img_dim, self.hidden_dim)
+        self.ctx_proj = nn.Sequential(
+            nn.Linear(self.hidden_dim * 3, self.hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(self.hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+        )
+        self.slot_queries = nn.Parameter(
+            torch.randn(self.num_slots, self.hidden_dim) * 0.02
+        )
+        self.slot_attn = nn.MultiheadAttention(
+            embed_dim=self.hidden_dim,
+            num_heads=max(1, int(num_heads)),
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.slot_norm = nn.LayerNorm(self.hidden_dim)
+        self.token_proj = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(self.hidden_dim),
+            nn.Linear(self.hidden_dim, self.text_dim),
+            nn.LayerNorm(self.text_dim),
+        )
+        self.global_proj = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(self.hidden_dim),
+            nn.Linear(self.hidden_dim, self.text_dim),
+            nn.LayerNorm(self.text_dim),
+        )
+
+    def forward(self, img_emb: torch.Tensor) -> dict:
+        if img_emb.dim() != 4:
+            raise ValueError(f"img_emb must be [B,C,H,W], got {tuple(img_emb.shape)}")
+        if img_emb.shape[1] != self.img_dim:
+            raise ValueError(
+                f"TASSG expected img_dim={self.img_dim}, got {int(img_emb.shape[1])}"
+            )
+
+        dtype = self.targetness_head[0].weight.dtype
+        x = img_emb.to(dtype=dtype)
+        bsz = int(x.shape[0])
+
+        targetness_logits = self.targetness_head(x)
+        targetness_prob = torch.sigmoid(targetness_logits)
+
+        vis_tokens = x.flatten(2).transpose(1, 2)
+        vis_tokens = self.vis_proj(vis_tokens)
+
+        weights = targetness_prob.flatten(2).transpose(1, 2)
+        z_target = (vis_tokens * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1e-6)
+        z_global = vis_tokens.mean(dim=1)
+        z_context = torch.cat([z_target, z_global, z_target - z_global], dim=-1)
+        z_context = self.ctx_proj(z_context)
+
+        queries = self.slot_queries.unsqueeze(0).expand(bsz, -1, -1)
+        queries = queries + z_context.unsqueeze(1)
+        slots, _ = self.slot_attn(queries, vis_tokens, vis_tokens, need_weights=False)
+        slots = self.slot_norm(slots + queries)
+
+        pred_tokens = self.token_proj(slots)
+        pred_global = self.global_proj(slots.mean(dim=1))
+        pred_attn_mask = torch.ones(
+            bsz,
+            self.num_slots,
+            dtype=torch.long,
+            device=img_emb.device,
+        )
+
+        return {
+            "global": pred_global,
+            "tokens": pred_tokens,
+            "attn_mask": pred_attn_mask,
+            "targetness_logits": targetness_logits,
+            "targetness_prob": targetness_prob,
+        }
+
+
+def build_targetness_aware_semantic_slot_generator(
+    img_dim: int = 256,
+    text_dim: int = 512,
+    num_slots: int = 8,
+    hidden_dim: int = 256,
+    num_heads: int = 4,
+    dropout: float = 0.0,
+) -> TargetnessAwareSemanticSlotGenerator:
+    return TargetnessAwareSemanticSlotGenerator(
+        img_dim=img_dim,
+        text_dim=text_dim,
+        num_slots=num_slots,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        dropout=dropout,
+    )
+
+
+def cosine_distill_loss(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+    student = F.normalize(student.float(), dim=-1)
+    teacher = F.normalize(teacher.float(), dim=-1)
+    return 1.0 - F.cosine_similarity(student, teacher, dim=-1).mean()
+
+
+def masked_token_set_cosine_loss(
+    student_tokens: torch.Tensor,
+    teacher_tokens: torch.Tensor,
+    teacher_mask: Optional[torch.Tensor] = None,
+    bidirectional: bool = True,
+) -> torch.Tensor:
+    student_tokens = F.normalize(student_tokens.float(), dim=-1)
+    teacher_tokens = F.normalize(teacher_tokens.float(), dim=-1)
+    sim = torch.matmul(student_tokens, teacher_tokens.transpose(1, 2))
+
+    valid = None
+    if teacher_mask is not None:
+        valid = teacher_mask.to(device=sim.device).bool()
+        sim = sim.masked_fill(~valid.unsqueeze(1), -1e4)
+
+    s2t = 1.0 - sim.max(dim=2).values.mean()
+    if not bidirectional:
+        return s2t
+
+    t2s = 1.0 - sim.transpose(1, 2).max(dim=2).values
+    if valid is not None:
+        mask = valid.to(t2s.dtype)
+        t2s = (t2s * mask).sum() / mask.sum().clamp_min(1.0)
+    else:
+        t2s = t2s.mean()
+    return 0.5 * (s2t + t2s)
+
+
+def targetness_aux_loss(
+    targetness_logits: torch.Tensor,
+    gt_mask: torch.Tensor,
+    bce_weight: float = 1.0,
+    dice_weight: float = 1.0,
+) -> torch.Tensor:
+    if gt_mask.dim() == 3:
+        gt = gt_mask.unsqueeze(1)
+    elif gt_mask.dim() == 4:
+        gt = gt_mask
+    else:
+        raise ValueError(
+            f"gt_mask must be [B,H,W] or [B,1,H,W], got {tuple(gt_mask.shape)}"
+        )
+
+    gt = gt.float().to(device=targetness_logits.device)
+    gt_small = F.interpolate(
+        gt,
+        size=targetness_logits.shape[-2:],
+        mode="nearest",
+    )
+    logits = targetness_logits.float()
+    bce = F.binary_cross_entropy_with_logits(logits, gt_small)
+
+    prob = torch.sigmoid(logits)
+    inter = (prob * gt_small).sum(dim=(1, 2, 3))
+    union = prob.sum(dim=(1, 2, 3)) + gt_small.sum(dim=(1, 2, 3))
+    dice = 1.0 - ((2.0 * inter + 1.0) / (union + 1.0)).mean()
+    return float(bce_weight) * bce + float(dice_weight) * dice

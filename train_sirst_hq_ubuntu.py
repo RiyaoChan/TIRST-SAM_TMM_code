@@ -57,10 +57,14 @@ from efficient_sam.text_conditioner import (
     build_backbone_bifusion_block_adapter,
     build_bifusion_adapter_lite,
     build_gated_backbone_bifusion_block_adapter,
+    build_targetness_aware_semantic_slot_generator,
     build_text_conditioner,
     build_text_dense_mask_prompt_generator,
     build_text_dense_mask_prompt_generator_v2,
     build_text_sparse_prompt_projector,
+    cosine_distill_loss,
+    masked_token_set_cosine_loss,
+    targetness_aux_loss,
 )
 from efficient_sam.self_prompting_head import (
     boundary_aware_self_prompt_loss,
@@ -723,6 +727,120 @@ def _build_text_prompt_inputs(
     return sparse_prompt, dense_prompt
 
 
+def _resolve_semantic_source(args, epoch: Optional[int] = None) -> str:
+    source = str(getattr(args, "semantic_source", "teacher")).lower()
+    if source not in ("teacher", "student", "none"):
+        raise ValueError(f"Unsupported semantic_source={source!r}")
+    start_epoch = int(getattr(args, "student_only_start_epoch", -1))
+    if source == "teacher" and epoch is not None and start_epoch >= 0 and epoch >= start_epoch:
+        source = "student"
+    return source
+
+
+def _any_tassg_loss_enabled(args) -> bool:
+    return any(
+        float(getattr(args, name, 0.0)) > 0.0
+        for name in (
+            "lambda_tassg_global",
+            "lambda_tassg_token",
+            "lambda_tassg_prompt",
+            "lambda_tassg_targetness",
+        )
+    )
+
+
+def _zero_scalar(device) -> torch.Tensor:
+    return torch.zeros((), device=device)
+
+
+def _compute_tassg_distillation_losses(
+    args,
+    tassg_out,
+    masks: torch.Tensor,
+    teacher_global: Optional[torch.Tensor],
+    teacher_tokens: Optional[torch.Tensor],
+    teacher_mask: Optional[torch.Tensor],
+    text_sparse_prompt=None,
+):
+    device = masks.device
+    losses = {
+        "global": _zero_scalar(device),
+        "token": _zero_scalar(device),
+        "prompt": _zero_scalar(device),
+        "targetness": _zero_scalar(device),
+    }
+    if tassg_out is None:
+        return losses
+
+    student_global = tassg_out.get("global", None)
+    student_tokens = tassg_out.get("tokens", None)
+    student_mask = tassg_out.get("attn_mask", None)
+
+    if teacher_global is not None and student_global is not None:
+        losses["global"] = cosine_distill_loss(student_global, teacher_global)
+    if teacher_tokens is not None and student_tokens is not None:
+        losses["token"] = masked_token_set_cosine_loss(
+            student_tokens,
+            teacher_tokens,
+            teacher_mask,
+            bidirectional=True,
+        )
+    if text_sparse_prompt is not None:
+        source = str(getattr(args, "text_sparse_prompt_source", "fused_tokens"))
+        teacher_sparse = None
+        student_sparse = None
+        if source == "raw_global" and teacher_global is not None and student_global is not None:
+            with torch.no_grad():
+                teacher_sparse = text_sparse_prompt(
+                    teacher_global,
+                    use_global_prompt_enhance=True,
+                )
+            student_sparse = text_sparse_prompt(
+                student_global,
+                use_global_prompt_enhance=True,
+            )
+        elif source == "fused_global" and teacher_global is not None and student_global is not None:
+            with torch.no_grad():
+                teacher_sparse = text_sparse_prompt(teacher_global)
+            student_sparse = text_sparse_prompt(student_global)
+        elif teacher_tokens is not None and student_tokens is not None:
+            with torch.no_grad():
+                teacher_sparse = text_sparse_prompt(
+                    teacher_tokens,
+                    attention_mask=teacher_mask,
+                )
+            student_sparse = text_sparse_prompt(
+                student_tokens,
+                attention_mask=student_mask,
+            )
+        if teacher_sparse is not None and student_sparse is not None:
+            losses["prompt"] = F.mse_loss(student_sparse.float(), teacher_sparse.float())
+    if "targetness_logits" in tassg_out:
+        losses["targetness"] = targetness_aux_loss(
+            tassg_out["targetness_logits"],
+            masks,
+        )
+    return losses
+
+
+def _activate_tassg_semantics(args, tassg, img_emb, epoch: Optional[int] = None):
+    semantic_source = _resolve_semantic_source(args, epoch=epoch)
+    if semantic_source == "student" and tassg is None:
+        raise RuntimeError("--semantic_source student requires --use_tassg.")
+    if tassg is None:
+        return semantic_source, None, None, None, None
+    tassg_out = tassg(img_emb)
+    if semantic_source != "student":
+        return semantic_source, tassg_out, None, None, None
+    return (
+        semantic_source,
+        tassg_out,
+        tassg_out["global"],
+        tassg_out["tokens"],
+        tassg_out["attn_mask"],
+    )
+
+
 def _build_bifusion_text_inputs(
     clip_feat: Optional[torch.Tensor],
     clip_token_feat: Optional[torch.Tensor],
@@ -1097,6 +1215,7 @@ def train_one_epoch(
     text_conditioner=None,
     text_sparse_prompt=None,
     text_dense_prompt=None,
+    tassg=None,
     bifusion_adapter=None,
     backbone_bifusion_adapter=None,
     self_prompt_head=None,
@@ -1119,6 +1238,8 @@ def train_one_epoch(
         dynamic_sparse_prompt_head.train()
     if contrastive_prompt is not None:
         contrastive_prompt.train()
+    if tassg is not None:
+        tassg.train()
     if bool(getattr(args, "dynamic_sparse_train_head_only", False)):
         model.eval()
         if pgap is not None:
@@ -1131,6 +1252,8 @@ def train_one_epoch(
             coarse_mask_head.eval()
         if contrastive_prompt is not None:
             contrastive_prompt.eval()
+        if tassg is not None:
+            tassg.eval()
         if dynamic_sparse_prompt_head is not None:
             dynamic_sparse_prompt_head.train()
     pgap_text_prior_only = bool(getattr(args, "pgap_text_prior_only", False))
@@ -1142,6 +1265,10 @@ def train_one_epoch(
     meter_stage2_sp, meter_stage2_sampled, meter_stage2_expected, meter_stage2_component = 0.0, 0.0, 0.0, 0.0
     meter_stage1_mask = 0.0
     meter_dyn_target = 0.0
+    meter_tassg_global = 0.0
+    meter_tassg_token = 0.0
+    meter_tassg_prompt = 0.0
+    meter_tassg_targetness = 0.0
     skipped_nonfinite = 0
     for batch_idx, batch in enumerate(loader, start=1):
         images = batch["image"].to(device, non_blocking=True)
@@ -1149,25 +1276,40 @@ def train_one_epoch(
         B, H, W = masks.shape
 
         encoder_ms_embeddings = None
+        semantic_source = _resolve_semantic_source(args, epoch=epoch)
+        teacher_global = None
+        teacher_tokens = None
+        teacher_mask = None
+        tassg_out = None
+        needs_teacher_features = (
+            semantic_source == "teacher"
+            or (tassg is not None and _any_tassg_loss_enabled(args))
+        )
         with autocast_ctx(device):
             clip_feat = None
             raw_clip_feat = None
             clip_token_feat = None
             clip_token_mask = None
-            if "clip_text_feat" in batch and (
-                text_conditioner is not None
-                or text_sparse_prompt is not None
-                or text_dense_prompt is not None
-                or bifusion_adapter is not None
-                or backbone_bifusion_adapter is not None
-            ):
-                clip_feat = batch["clip_text_feat"].to(device, non_blocking=True)
-                raw_clip_feat = clip_feat
-            if (text_sparse_prompt is not None or bifusion_adapter is not None or backbone_bifusion_adapter is not None) and "clip_text_token_feat" in batch:
-                clip_token_feat = batch["clip_text_token_feat"].to(device, non_blocking=True)
+            if needs_teacher_features and "clip_text_feat" in batch:
+                teacher_global = batch["clip_text_feat"].to(device, non_blocking=True)
+            if needs_teacher_features and "clip_text_token_feat" in batch:
+                teacher_tokens = batch["clip_text_token_feat"].to(device, non_blocking=True)
                 if "clip_text_attn_mask" in batch:
-                    clip_token_mask = batch["clip_text_attn_mask"].to(device, non_blocking=True)
-            if (not pgap_text_prior_only) and backbone_bifusion_adapter is not None:
+                    teacher_mask = batch["clip_text_attn_mask"].to(device, non_blocking=True)
+            if semantic_source == "teacher":
+                clip_feat = teacher_global
+                raw_clip_feat = teacher_global
+                clip_token_feat = teacher_tokens
+                clip_token_mask = teacher_mask
+            elif semantic_source == "student" and tassg is None:
+                raise RuntimeError("--semantic_source student requires --use_tassg.")
+
+            use_teacher_backbone = (
+                semantic_source == "teacher"
+                and (not pgap_text_prior_only)
+                and backbone_bifusion_adapter is not None
+            )
+            if use_teacher_backbone:
                 img_emb, interms, detail_ms_embeddings, clip_feat, clip_token_feat, clip_token_mask = _apply_backbone_bifusion_adapter(
                     model=model,
                     backbone_bifusion_adapter=backbone_bifusion_adapter,
@@ -1187,7 +1329,31 @@ def train_one_epoch(
                     image_embedding_output,
                     use_detail_outputs=use_detail_outputs,
                 )
-        if (not pgap_text_prior_only) and bifusion_adapter is not None:
+
+        if tassg is not None and (semantic_source == "student" or _any_tassg_loss_enabled(args)):
+            tassg_out = tassg(img_emb)
+            if semantic_source == "student":
+                clip_feat = tassg_out["global"]
+                raw_clip_feat = clip_feat
+                clip_token_feat = tassg_out["tokens"]
+                clip_token_mask = tassg_out["attn_mask"]
+                if (
+                    bool(getattr(args, "tassg_two_pass_backbone", False))
+                    and (not pgap_text_prior_only)
+                    and backbone_bifusion_adapter is not None
+                ):
+                    with autocast_ctx(device):
+                        img_emb, interms, detail_ms_embeddings, clip_feat, clip_token_feat, clip_token_mask = _apply_backbone_bifusion_adapter(
+                            model=model,
+                            backbone_bifusion_adapter=backbone_bifusion_adapter,
+                            images=images,
+                            clip_feat=tassg_out["global"],
+                            clip_token_feat=tassg_out["tokens"],
+                            clip_token_mask=tassg_out["attn_mask"],
+                        )
+                    raw_clip_feat = tassg_out["global"]
+
+        if (not pgap_text_prior_only) and semantic_source != "none" and bifusion_adapter is not None:
             img_emb, interms, detail_ms_embeddings, clip_feat, clip_token_feat, clip_token_mask = _apply_bifusion_adapter(
                 bifusion_adapter=bifusion_adapter,
                 img_emb=img_emb,
@@ -1197,7 +1363,7 @@ def train_one_epoch(
                 clip_token_feat=clip_token_feat,
                 clip_token_mask=clip_token_mask,
             )
-        if (not pgap_text_prior_only) and text_conditioner is not None and clip_feat is not None:
+        if (not pgap_text_prior_only) and semantic_source != "none" and text_conditioner is not None and clip_feat is not None:
             img_emb = text_conditioner(img_emb, clip_feat)
         pgap_text_prior = None
         if pgap is not None:
@@ -1593,6 +1759,29 @@ def train_one_epoch(
         loss = bce(logits, masks.unsqueeze(1)) + dice_loss(logits, masks.unsqueeze(1))
         if nwd_criterion is not None:
             loss = loss + nwd_weight * nwd_criterion(logits, masks.unsqueeze(1))
+        tassg_losses = {
+            "global": _zero_scalar(device),
+            "token": _zero_scalar(device),
+            "prompt": _zero_scalar(device),
+            "targetness": _zero_scalar(device),
+        }
+        if tassg is not None:
+            tassg_losses = _compute_tassg_distillation_losses(
+                args=args,
+                tassg_out=tassg_out,
+                masks=masks,
+                teacher_global=teacher_global,
+                teacher_tokens=teacher_tokens,
+                teacher_mask=teacher_mask,
+                text_sparse_prompt=text_sparse_prompt,
+            )
+            loss = (
+                loss
+                + float(getattr(args, "lambda_tassg_global", 0.0)) * tassg_losses["global"]
+                + float(getattr(args, "lambda_tassg_token", 0.0)) * tassg_losses["token"]
+                + float(getattr(args, "lambda_tassg_prompt", 0.0)) * tassg_losses["prompt"]
+                + float(getattr(args, "lambda_tassg_targetness", 0.0)) * tassg_losses["targetness"]
+            )
         freq_weight = float(getattr(args, "freq_consistency_weight", 0.0))
         if freq_weight > 0.0:
             bins = max(2, int(getattr(args, "freq_consistency_bins", 32)))
@@ -1783,6 +1972,11 @@ def train_one_epoch(
             meter_dyn_sparse += dynamic_sparse_div_loss.item() * B
         if dynamic_sparse_target_loss is not None:
             meter_dyn_target += dynamic_sparse_target_loss.item() * B
+        if tassg is not None:
+            meter_tassg_global += float(tassg_losses["global"].detach().item()) * B
+            meter_tassg_token += float(tassg_losses["token"].detach().item()) * B
+            meter_tassg_prompt += float(tassg_losses["prompt"].detach().item()) * B
+            meter_tassg_targetness += float(tassg_losses["targetness"].detach().item()) * B
         n += B
     if skipped_nonfinite > 0:
         log_line(
@@ -1805,6 +1999,11 @@ def train_one_epoch(
         "coarse_mask": meter_coarse_mask / denom,
         "dynamic_sparse": meter_dyn_sparse / denom,
         "dynamic_sparse_target": meter_dyn_target / denom,
+        "tassg_global": meter_tassg_global / denom,
+        "tassg_token": meter_tassg_token / denom,
+        "tassg_prompt": meter_tassg_prompt / denom,
+        "tassg_targetness": meter_tassg_targetness / denom,
+        "semantic_source": _resolve_semantic_source(args, epoch=epoch),
     }
 
 
@@ -1819,6 +2018,7 @@ def validate(
     text_conditioner=None,
     text_sparse_prompt=None,
     text_dense_prompt=None,
+    tassg=None,
     bifusion_adapter=None,
     backbone_bifusion_adapter=None,
     self_prompt_head=None,
@@ -1841,6 +2041,8 @@ def validate(
         dynamic_sparse_prompt_head.eval()
     if contrastive_prompt is not None:
         contrastive_prompt.eval()
+    if tassg is not None:
+        tassg.eval()
     pgap_text_prior_only = bool(getattr(args, "pgap_text_prior_only", False))
     # Compute metrics exactly matching definitions:
     # mIoU: Global Intersection / Global Union
@@ -1862,20 +2064,24 @@ def validate(
         clip_token_feat = None
         clip_token_mask = None
         encoder_ms_embeddings = None
-        if "clip_text_feat" in batch and (
-            text_conditioner is not None
-            or text_sparse_prompt is not None
-            or text_dense_prompt is not None
-            or bifusion_adapter is not None
-            or backbone_bifusion_adapter is not None
-        ):
-            clip_feat = batch["clip_text_feat"].to(device, non_blocking=True)
-            raw_clip_feat = clip_feat
-        if (text_sparse_prompt is not None or bifusion_adapter is not None or backbone_bifusion_adapter is not None) and "clip_text_token_feat" in batch:
-            clip_token_feat = batch["clip_text_token_feat"].to(device, non_blocking=True)
-            if "clip_text_attn_mask" in batch:
-                clip_token_mask = batch["clip_text_attn_mask"].to(device, non_blocking=True)
-        if (not pgap_text_prior_only) and backbone_bifusion_adapter is not None:
+        semantic_source = _resolve_semantic_source(args, epoch=epoch)
+        if semantic_source == "teacher":
+            if "clip_text_feat" in batch:
+                clip_feat = batch["clip_text_feat"].to(device, non_blocking=True)
+                raw_clip_feat = clip_feat
+            if "clip_text_token_feat" in batch:
+                clip_token_feat = batch["clip_text_token_feat"].to(device, non_blocking=True)
+                if "clip_text_attn_mask" in batch:
+                    clip_token_mask = batch["clip_text_attn_mask"].to(device, non_blocking=True)
+        elif semantic_source == "student" and tassg is None:
+            raise RuntimeError("--semantic_source student requires --use_tassg.")
+
+        use_teacher_backbone = (
+            semantic_source == "teacher"
+            and (not pgap_text_prior_only)
+            and backbone_bifusion_adapter is not None
+        )
+        if use_teacher_backbone:
             img_emb, interms, detail_ms_embeddings, clip_feat, clip_token_feat, clip_token_mask = _apply_backbone_bifusion_adapter(
                 model=model,
                 backbone_bifusion_adapter=backbone_bifusion_adapter,
@@ -1895,7 +2101,27 @@ def validate(
                 image_embedding_output,
                 use_detail_outputs=use_detail_outputs,
             )
-        if (not pgap_text_prior_only) and bifusion_adapter is not None:
+        if tassg is not None and semantic_source == "student":
+            tassg_out = tassg(img_emb)
+            clip_feat = tassg_out["global"]
+            raw_clip_feat = clip_feat
+            clip_token_feat = tassg_out["tokens"]
+            clip_token_mask = tassg_out["attn_mask"]
+            if (
+                bool(getattr(args, "tassg_two_pass_backbone", False))
+                and (not pgap_text_prior_only)
+                and backbone_bifusion_adapter is not None
+            ):
+                img_emb, interms, detail_ms_embeddings, clip_feat, clip_token_feat, clip_token_mask = _apply_backbone_bifusion_adapter(
+                    model=model,
+                    backbone_bifusion_adapter=backbone_bifusion_adapter,
+                    images=images,
+                    clip_feat=tassg_out["global"],
+                    clip_token_feat=tassg_out["tokens"],
+                    clip_token_mask=tassg_out["attn_mask"],
+                )
+                raw_clip_feat = tassg_out["global"]
+        if (not pgap_text_prior_only) and semantic_source != "none" and bifusion_adapter is not None:
             img_emb, interms, detail_ms_embeddings, clip_feat, clip_token_feat, clip_token_mask = _apply_bifusion_adapter(
                 bifusion_adapter=bifusion_adapter,
                 img_emb=img_emb,
@@ -1905,7 +2131,7 @@ def validate(
                 clip_token_feat=clip_token_feat,
                 clip_token_mask=clip_token_mask,
             )
-        if (not pgap_text_prior_only) and text_conditioner is not None and clip_feat is not None:
+        if (not pgap_text_prior_only) and semantic_source != "none" and text_conditioner is not None and clip_feat is not None:
             img_emb = text_conditioner(img_emb, clip_feat)
         pgap_text_prior = None
         if pgap is not None:
@@ -2658,6 +2884,25 @@ def main():
                    help="Path to pre-computed CLIP text features file (.pt).")
     p.add_argument("--mllm_text_dim", type=int, default=512,
                    help="Dimension of CLIP text features (512 for ViT-B/32).")
+    p.add_argument("--use_tassg", action="store_true",
+                   help="Enable Targetness-aware Semantic Slot Generator.")
+    p.add_argument("--semantic_source", type=str, default="teacher", choices=["teacher", "student", "none"],
+                   help="Semantic source for text prompt/fusion modules.")
+    p.add_argument("--tassg_num_slots", type=int, default=8)
+    p.add_argument("--tassg_hidden_dim", type=int, default=256)
+    p.add_argument("--tassg_num_heads", type=int, default=4)
+    p.add_argument("--tassg_dropout", type=float, default=0.0)
+    p.add_argument("--tassg_img_dim", type=int, default=256)
+    p.add_argument("--tassg_text_dim", type=int, default=None,
+                   help="Text feature dimension for TASSG. If omitted, uses --mllm_text_dim.")
+    p.add_argument("--tassg_two_pass_backbone", action="store_true",
+                   help="Run student TASSG once, then rerun the backbone with student tokens for CBGA.")
+    p.add_argument("--student_only_start_epoch", type=int, default=-1,
+                   help="If >=0, switch semantic_source teacher to student from this epoch onward.")
+    p.add_argument("--lambda_tassg_global", type=float, default=0.1)
+    p.add_argument("--lambda_tassg_token", type=float, default=0.1)
+    p.add_argument("--lambda_tassg_prompt", type=float, default=0.5)
+    p.add_argument("--lambda_tassg_targetness", type=float, default=0.2)
     p.add_argument("--disable_text_conditioner", action="store_true",
                    help="Disable FiLM-style text conditioning on image embeddings while keeping other text modules.")
     p.add_argument("--use_text_sparse_prompt", action="store_true",
@@ -2789,7 +3034,9 @@ def main():
         sc_pos_prob=args.sc_pos_prob,
         sc_dataset_name=args.sc_dataset_name,
         sc_eval_crop="random",
-        mllm_features_path=getattr(args, "mllm_features_path", None) if getattr(args, "use_mllm_prompt", False) else None,
+        mllm_features_path=getattr(args, "mllm_features_path", None)
+        if (getattr(args, "use_mllm_prompt", False) or getattr(args, "use_tassg", False))
+        else None,
     )
     val_loader = make_loader(
         args.data_root,
@@ -2807,7 +3054,9 @@ def main():
         sc_pos_prob=args.sc_pos_prob,
         sc_dataset_name=args.sc_dataset_name,
         sc_eval_crop=args.sc_eval_crop,
-        mllm_features_path=getattr(args, "mllm_features_path", None) if getattr(args, "use_mllm_prompt", False) else None,
+        mllm_features_path=getattr(args, "mllm_features_path", None)
+        if (getattr(args, "use_mllm_prompt", False) or getattr(args, "use_tassg", False))
+        else None,
     )
 
     # Model
@@ -3503,6 +3752,7 @@ def main():
     text_conditioner = None
     text_sparse_prompt = None
     text_dense_prompt = None
+    tassg = None
     bifusion_adapter = None
     backbone_bifusion_adapter = None
     pgap_text_prior_only = bool(getattr(args, "pgap_text_prior_only", False))
@@ -3647,6 +3897,45 @@ def main():
         log_line("[warn] Text sparse/dense/backbone-bifusion flags require --use_mllm_prompt; ignoring.", args.log_file)
     elif getattr(args, "use_bifusion_adapter", False):
         log_line("[warn] --use_bifusion_adapter requires --use_mllm_prompt; ignoring.", args.log_file)
+
+    if getattr(args, "use_tassg", False):
+        tassg_text_dim = getattr(args, "tassg_text_dim", None)
+        if tassg_text_dim is None:
+            tassg_text_dim = int(getattr(args, "mllm_text_dim", 512))
+        tassg = build_targetness_aware_semantic_slot_generator(
+            img_dim=int(getattr(args, "tassg_img_dim", 256)),
+            text_dim=int(tassg_text_dim),
+            num_slots=max(1, int(getattr(args, "tassg_num_slots", 8))),
+            hidden_dim=max(8, int(getattr(args, "tassg_hidden_dim", 256))),
+            num_heads=max(1, int(getattr(args, "tassg_num_heads", 4))),
+            dropout=float(getattr(args, "tassg_dropout", 0.0)),
+        ).to(device)
+        head_params += list(tassg.parameters())
+        n_tassg = sum(p.numel() for p in tassg.parameters())
+        log_line(
+            "TASSG enabled: "
+            f"semantic_source={getattr(args, 'semantic_source', 'teacher')}, "
+            f"slots={int(getattr(args, 'tassg_num_slots', 8))}, "
+            f"img_dim={int(getattr(args, 'tassg_img_dim', 256))}, "
+            f"text_dim={int(tassg_text_dim)}, "
+            f"hidden={int(getattr(args, 'tassg_hidden_dim', 256))}, "
+            f"heads={int(getattr(args, 'tassg_num_heads', 4))}, "
+            f"two_pass={bool(getattr(args, 'tassg_two_pass_backbone', False))}, "
+            f"lambda_global={float(getattr(args, 'lambda_tassg_global', 0.0)):.4f}, "
+            f"lambda_token={float(getattr(args, 'lambda_tassg_token', 0.0)):.4f}, "
+            f"lambda_prompt={float(getattr(args, 'lambda_tassg_prompt', 0.0)):.4f}, "
+            f"lambda_targetness={float(getattr(args, 'lambda_tassg_targetness', 0.0)):.4f}, "
+            f"params={n_tassg}",
+            args.log_file,
+        )
+        if str(getattr(args, "semantic_source", "teacher")) == "student" and text_sparse_prompt is None and bifusion_adapter is None and backbone_bifusion_adapter is None and text_conditioner is None:
+            log_line(
+                "[warn] --semantic_source student is enabled but no text prompt/fusion module was constructed; TASSG will only add distillation losses.",
+                args.log_file,
+            )
+    elif str(getattr(args, "semantic_source", "teacher")) == "student":
+        raise RuntimeError("--semantic_source student requires --use_tassg.")
+
     if getattr(args, "pgap_text_fuse_internal", False):
         if not getattr(args, "use_pgap", False):
             log_line("[warn] --pgap_text_fuse_internal is set but --use_pgap is disabled; internal fusion will not run.", args.log_file)
@@ -3694,6 +3983,7 @@ def main():
                     _restore_aux_module(text_conditioner, "text_conditioner")
                     _restore_aux_module(text_sparse_prompt, "text_sparse_prompt")
                     _restore_aux_module(text_dense_prompt, "text_dense_prompt")
+                    _restore_aux_module(tassg, "tassg")
                     _restore_aux_module(bifusion_adapter, "bifusion_adapter")
                     _restore_aux_module(backbone_bifusion_adapter, "backbone_bifusion_adapter")
                     _restore_aux_module(lca_prompt, "lca_prompt")
@@ -3753,6 +4043,8 @@ def main():
                         head_params += list(text_sparse_prompt.parameters())
                     if text_dense_prompt is not None:
                         head_params += list(text_dense_prompt.parameters())
+                    if tassg is not None:
+                        head_params += list(tassg.parameters())
                     if bifusion_adapter is not None:
                         head_params += list(bifusion_adapter.parameters())
                     if backbone_bifusion_adapter is not None:
@@ -3778,6 +4070,7 @@ def main():
             text_conditioner,
             text_sparse_prompt,
             text_dense_prompt,
+            tassg,
             bifusion_adapter,
             backbone_bifusion_adapter,
             lca_prompt,
@@ -3822,6 +4115,7 @@ def main():
             text_conditioner=text_conditioner,
             text_sparse_prompt=text_sparse_prompt,
             text_dense_prompt=text_dense_prompt,
+            tassg=tassg,
             bifusion_adapter=bifusion_adapter,
             backbone_bifusion_adapter=backbone_bifusion_adapter,
             self_prompt_head=self_prompt_head,
@@ -3836,6 +4130,7 @@ def main():
             text_conditioner=text_conditioner,
             text_sparse_prompt=text_sparse_prompt,
             text_dense_prompt=text_dense_prompt,
+            tassg=tassg,
             bifusion_adapter=bifusion_adapter,
             backbone_bifusion_adapter=backbone_bifusion_adapter,
             self_prompt_head=self_prompt_head,
@@ -3860,7 +4155,12 @@ def main():
             f"stage1_mask={train_stats.get('stage1_mask', 0.0):.4f} "
             f"coarse_mask={train_stats.get('coarse_mask', 0.0):.4f} "
             f"dyn_sparse={train_stats.get('dynamic_sparse', 0.0):.4f} "
-            f"dyn_target={train_stats.get('dynamic_sparse_target', 0.0):.4f}",
+            f"dyn_target={train_stats.get('dynamic_sparse_target', 0.0):.4f} "
+            f"tassg_global={train_stats.get('tassg_global', 0.0):.4f} "
+            f"tassg_token={train_stats.get('tassg_token', 0.0):.4f} "
+            f"tassg_prompt={train_stats.get('tassg_prompt', 0.0):.4f} "
+            f"tassg_targetness={train_stats.get('tassg_targetness', 0.0):.4f} "
+            f"semantic_source={train_stats.get('semantic_source', getattr(args, 'semantic_source', 'teacher'))}",
             args.log_file,
         )
 
@@ -3912,6 +4212,8 @@ def main():
                 head_params += list(text_sparse_prompt.parameters())
             if text_dense_prompt is not None:
                 head_params += list(text_dense_prompt.parameters())
+            if tassg is not None:
+                head_params += list(tassg.parameters())
             if bifusion_adapter is not None:
                 head_params += list(bifusion_adapter.parameters())
             if backbone_bifusion_adapter is not None:
@@ -3952,6 +4254,8 @@ def main():
             ckpt["text_sparse_prompt"] = text_sparse_prompt.state_dict()
         if text_dense_prompt is not None:
             ckpt["text_dense_prompt"] = text_dense_prompt.state_dict()
+        if tassg is not None:
+            ckpt["tassg"] = tassg.state_dict()
         if bifusion_adapter is not None:
             ckpt["bifusion_adapter"] = bifusion_adapter.state_dict()
         if backbone_bifusion_adapter is not None:

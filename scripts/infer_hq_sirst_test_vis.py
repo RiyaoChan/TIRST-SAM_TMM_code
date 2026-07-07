@@ -22,6 +22,7 @@ from efficient_sam.text_conditioner import (
     build_backbone_bifusion_block_adapter,
     build_bifusion_adapter_lite,
     build_gated_backbone_bifusion_block_adapter,
+    build_targetness_aware_semantic_slot_generator,
     build_text_conditioner,
     build_text_dense_mask_prompt_generator,
     build_text_dense_mask_prompt_generator_v2,
@@ -36,6 +37,7 @@ from train_sirst_hq_ubuntu import (
     autocast_ctx,
     compute_metrics,
     sample_points_from_mask,
+    make_empty_point_prompt,
 )
 
 
@@ -51,6 +53,10 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--max_samples", type=int, default=0)
+    parser.add_argument("--prompt_mode", type=str, default=None, choices=["gt_points", "assp_only"])
+    parser.add_argument("--use_tassg", action="store_true")
+    parser.add_argument("--semantic_source", type=str, default=None, choices=["teacher", "student", "none"])
+    parser.add_argument("--save_tassg_targetness", action="store_true")
     return parser.parse_args()
 
 
@@ -69,6 +75,22 @@ def io_path(path: str) -> str:
 
 def ns_from_dict(data: Dict) -> SimpleNamespace:
     return SimpleNamespace(**data)
+
+
+def semantic_source_from_args(cli_args: argparse.Namespace, ckpt_args: SimpleNamespace) -> str:
+    source = cli_args.semantic_source
+    if source is None:
+        source = getattr(ckpt_args, "semantic_source", "teacher")
+    source = str(source).lower()
+    if source not in ("teacher", "student", "none"):
+        raise ValueError(f"Unsupported semantic_source={source!r}")
+    return source
+
+
+def first_two_embeddings(output):
+    if not isinstance(output, (tuple, list)) or len(output) < 2:
+        raise ValueError("model.get_image_embeddings() must return at least (img_emb, interms).")
+    return output[0], output[1]
 
 
 def resolve_existing_path(*candidates: Optional[str]) -> Optional[str]:
@@ -231,6 +253,7 @@ def build_modules(ckpt_args: SimpleNamespace, device: str):
     text_conditioner = None
     text_sparse_prompt = None
     text_dense_prompt = None
+    tassg = None
     bifusion_adapter = None
     backbone_bifusion_adapter = None
 
@@ -317,12 +340,26 @@ def build_modules(ckpt_args: SimpleNamespace, device: str):
             else:
                 model.image_encoder.block_text_fuser = backbone_bifusion_adapter
 
+    if bool(getattr(ckpt_args, "use_tassg", False)):
+        tassg_text_dim = getattr(ckpt_args, "tassg_text_dim", None)
+        if tassg_text_dim is None:
+            tassg_text_dim = int(getattr(ckpt_args, "mllm_text_dim", 512))
+        tassg = build_targetness_aware_semantic_slot_generator(
+            img_dim=int(getattr(ckpt_args, "tassg_img_dim", 256)),
+            text_dim=int(tassg_text_dim),
+            num_slots=max(1, int(getattr(ckpt_args, "tassg_num_slots", 8))),
+            hidden_dim=max(8, int(getattr(ckpt_args, "tassg_hidden_dim", 256))),
+            num_heads=max(1, int(getattr(ckpt_args, "tassg_num_heads", 4))),
+            dropout=float(getattr(ckpt_args, "tassg_dropout", 0.0)),
+        ).to(device)
+
     model.to(device)
     return {
         "model": model,
         "text_conditioner": text_conditioner,
         "text_sparse_prompt": text_sparse_prompt,
         "text_dense_prompt": text_dense_prompt,
+        "tassg": tassg,
         "bifusion_adapter": bifusion_adapter,
         "backbone_bifusion_adapter": backbone_bifusion_adapter,
     }
@@ -338,6 +375,7 @@ def load_checkpoint_modules(modules: Dict[str, Optional[torch.nn.Module]], check
         "text_conditioner",
         "text_sparse_prompt",
         "text_dense_prompt",
+        "tassg",
         "bifusion_adapter",
         "backbone_bifusion_adapter",
     ]:
@@ -445,10 +483,15 @@ def main():
     checkpoint_path = os.path.abspath(cli_args.checkpoint)
     checkpoint = torch.load(io_path(checkpoint_path), map_location="cpu")
     ckpt_args = ns_from_dict(dict(checkpoint["args"]))
+    if cli_args.use_tassg:
+        setattr(ckpt_args, "use_tassg", True)
+    semantic_source = semantic_source_from_args(cli_args, ckpt_args)
+    if semantic_source == "student":
+        setattr(ckpt_args, "use_tassg", True)
 
     data_root = resolve_data_root(cli_args.data_root, ckpt_args)
     split_txt = resolve_split_txt(cli_args.split_txt, data_root, ckpt_args)
-    mllm_features_path = resolve_mllm_features_path(data_root, ckpt_args)
+    mllm_features_path = resolve_mllm_features_path(data_root, ckpt_args) if semantic_source == "teacher" else None
     feature_store = MLLMFeatureStore(mllm_features_path)
 
     out_dir = cli_args.out_dir
@@ -460,12 +503,15 @@ def main():
     mask_dir = os.path.join(out_dir, "masks")
     overlay_dir = os.path.join(out_dir, "overlays")
     panel_dir = os.path.join(out_dir, "panels")
+    targetness_dir = os.path.join(out_dir, "tassg_targetness")
     mask_dir_io = io_path(mask_dir)
     overlay_dir_io = io_path(overlay_dir)
     panel_dir_io = io_path(panel_dir)
     os.makedirs(mask_dir_io, exist_ok=True)
     os.makedirs(overlay_dir_io, exist_ok=True)
     os.makedirs(panel_dir_io, exist_ok=True)
+    if cli_args.save_tassg_targetness:
+        os.makedirs(io_path(targetness_dir), exist_ok=True)
 
     modules = build_modules(ckpt_args, cli_args.device)
     load_checkpoint_modules(modules, checkpoint)
@@ -477,6 +523,7 @@ def main():
     text_conditioner = modules["text_conditioner"]
     text_sparse_prompt = modules["text_sparse_prompt"]
     text_dense_prompt = modules["text_dense_prompt"]
+    tassg = modules["tassg"]
     bifusion_adapter = modules["bifusion_adapter"]
     backbone_bifusion_adapter = modules["backbone_bifusion_adapter"]
 
@@ -493,6 +540,7 @@ def main():
     metrics_iou = []
     metrics_f1 = []
     ckpt_epoch = int(checkpoint.get("epoch", 0))
+    prompt_mode = cli_args.prompt_mode or str(getattr(ckpt_args, "prompt_mode", "gt_points"))
 
     for idx, name in enumerate(names, start=1):
         image_path = _find_with_ext(image_root, name)
@@ -517,17 +565,20 @@ def main():
 
         images = image_t.unsqueeze(0).to(cli_args.device, non_blocking=True)
         masks = mask_t.unsqueeze(0).to(cli_args.device, non_blocking=True)
-        pts, lbl = sample_points_from_mask(
-            masks,
-            n_pos=int(getattr(ckpt_args, "n_pos", 4)),
-            n_neg=int(getattr(ckpt_args, "n_neg", 4)),
-            boundary_prior=bool(getattr(ckpt_args, "boundary_prior_sampling", False)),
-            boundary_ratio=float(getattr(ckpt_args, "boundary_ratio", 0.5)),
-        )
-        pts = pts.to(cli_args.device, non_blocking=True)
-        lbl = lbl.to(cli_args.device, non_blocking=True)
+        if prompt_mode == "assp_only":
+            pts, lbl = make_empty_point_prompt(1, cli_args.device)
+        else:
+            pts, lbl = sample_points_from_mask(
+                masks,
+                n_pos=int(getattr(ckpt_args, "n_pos", 4)),
+                n_neg=int(getattr(ckpt_args, "n_neg", 4)),
+                boundary_prior=bool(getattr(ckpt_args, "boundary_prior_sampling", False)),
+                boundary_ratio=float(getattr(ckpt_args, "boundary_ratio", 0.5)),
+            )
+            pts = pts.to(cli_args.device, non_blocking=True)
+            lbl = lbl.to(cli_args.device, non_blocking=True)
 
-        text_inputs = feature_store.get(Path(image_path).stem)
+        text_inputs = feature_store.get(Path(image_path).stem) if semantic_source == "teacher" else {}
         clip_feat = None
         raw_clip_feat = None
         clip_token_feat = None
@@ -541,10 +592,11 @@ def main():
             if "clip_text_attn_mask" in text_inputs:
                 clip_token_mask = text_inputs["clip_text_attn_mask"].unsqueeze(0).to(cli_args.device, non_blocking=True)
 
+        targetness_prob = None
         with torch.inference_mode():
             with autocast_ctx(cli_args.device):
-                if backbone_bifusion_adapter is not None:
-                    img_emb, interms, clip_feat, clip_token_feat, clip_token_mask = _apply_backbone_bifusion_adapter(
+                if semantic_source == "teacher" and backbone_bifusion_adapter is not None:
+                    img_emb, interms, _, clip_feat, clip_token_feat, clip_token_mask = _apply_backbone_bifusion_adapter(
                         model=model,
                         backbone_bifusion_adapter=backbone_bifusion_adapter,
                         images=images,
@@ -553,19 +605,40 @@ def main():
                         clip_token_mask=clip_token_mask,
                     )
                 else:
-                    img_emb, interms = model.get_image_embeddings(images)
+                    img_emb, interms = first_two_embeddings(model.get_image_embeddings(images))
 
-                if bifusion_adapter is not None:
-                    img_emb, interms, clip_feat, clip_token_feat, clip_token_mask = _apply_bifusion_adapter(
+                if semantic_source == "student":
+                    if tassg is None:
+                        raise RuntimeError("--semantic_source student requires a checkpoint with TASSG weights.")
+                    tassg_out = tassg(img_emb)
+                    clip_feat = tassg_out["global"]
+                    raw_clip_feat = clip_feat
+                    clip_token_feat = tassg_out["tokens"]
+                    clip_token_mask = tassg_out["attn_mask"]
+                    targetness_prob = tassg_out.get("targetness_prob", None)
+                    if bool(getattr(ckpt_args, "tassg_two_pass_backbone", False)) and backbone_bifusion_adapter is not None:
+                        img_emb, interms, _, clip_feat, clip_token_feat, clip_token_mask = _apply_backbone_bifusion_adapter(
+                            model=model,
+                            backbone_bifusion_adapter=backbone_bifusion_adapter,
+                            images=images,
+                            clip_feat=tassg_out["global"],
+                            clip_token_feat=tassg_out["tokens"],
+                            clip_token_mask=tassg_out["attn_mask"],
+                        )
+                        raw_clip_feat = tassg_out["global"]
+
+                if semantic_source != "none" and bifusion_adapter is not None:
+                    img_emb, interms, _, clip_feat, clip_token_feat, clip_token_mask = _apply_bifusion_adapter(
                         bifusion_adapter=bifusion_adapter,
                         img_emb=img_emb,
                         interms=interms,
+                        detail_ms_embeddings=None,
                         clip_feat=clip_feat,
                         clip_token_feat=clip_token_feat,
                         clip_token_mask=clip_token_mask,
                     )
 
-                if text_conditioner is not None and clip_feat is not None:
+                if semantic_source != "none" and text_conditioner is not None and clip_feat is not None:
                     img_emb = text_conditioner(img_emb, clip_feat)
 
                 text_sparse_embeds, text_dense_mask = _build_text_prompt_inputs(
@@ -617,6 +690,17 @@ def main():
 
         mask_path_out = os.path.join(mask_dir, f"{Path(image_path).stem}.png")
         Image.fromarray((pred_mask.astype(np.uint8) * 255), mode="L").save(io_path(mask_path_out))
+        if cli_args.save_tassg_targetness and targetness_prob is not None:
+            targetness = F.interpolate(
+                targetness_prob.float(),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )[0, 0].detach().cpu().numpy()
+            targetness = np.clip(targetness * 255.0, 0, 255).astype(np.uint8)
+            Image.fromarray(targetness, mode="L").save(
+                io_path(os.path.join(targetness_dir, f"{Path(image_path).stem}.png"))
+            )
 
         points_vis = pts[0, 0].detach().cpu()
         labels_vis = lbl[0, 0].detach().cpu()
@@ -639,7 +723,8 @@ def main():
         "split_txt": split_txt,
         "mllm_features_path": mllm_features_path,
         "out_dir": out_dir,
-        "prompt_mode": "gt_mask_sampled_points",
+        "prompt_mode": prompt_mode,
+        "semantic_source": semantic_source,
         "inference_mode": "full_image",
         "threshold": float(cli_args.thr),
         "seed": int(cli_args.seed),
