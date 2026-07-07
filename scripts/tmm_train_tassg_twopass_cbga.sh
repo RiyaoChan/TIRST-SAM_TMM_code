@@ -9,9 +9,7 @@ TRAIN_TXT=${TRAIN_TXT:-50_50/train.txt}
 VAL_TXT=${VAL_TXT:-50_50/test.txt}
 FEATURE_PATH=${FEATURE_PATH:-${DATA_ROOT}/Qwen3-VL-8B-Instruct_mllm_clip_token_features.pt}
 GPU=${GPU:-0}
-SINGLE_PASS_EPOCHS=${SINGLE_PASS_EPOCHS:-1000}
 TWO_PASS_EXTRA_EPOCHS=${TWO_PASS_EXTRA_EPOCHS:-300}
-EPOCHS=${EPOCHS:-$((SINGLE_PASS_EPOCHS + TWO_PASS_EXTRA_EPOCHS))}
 EXP_NAME=${EXP_NAME:-${DATASET}_TASSG_twopassCBGA_ASSPonly_noGTpoints_split50_50}
 OUT_DIR=${OUT_DIR:-${PROJECT_DIR}/outputs_tassg_twopass_cbga}
 INIT_CKPT=${INIT_CKPT:-${PROJECT_DIR}/weights/efficient_sam_vitt.pt}
@@ -35,6 +33,13 @@ fi
 
 if [[ ! -f "${SINGLE_PASS_CKPT}" ]]; then
   echo "SINGLE_PASS_CKPT does not exist: ${SINGLE_PASS_CKPT}" >&2
+  exit 1
+fi
+
+CKPT_EPOCH=$("${PYTHON}" -c "import torch; ckpt=torch.load('${SINGLE_PASS_CKPT}', map_location='cpu'); print(int(ckpt.get('epoch', 0)))")
+EPOCHS=${EPOCHS:-$((CKPT_EPOCH + TWO_PASS_EXTRA_EPOCHS))}
+if (( EPOCHS <= CKPT_EPOCH )); then
+  echo "EPOCHS must be greater than checkpoint epoch. CKPT_EPOCH=${CKPT_EPOCH}, EPOCHS=${EPOCHS}" >&2
   exit 1
 fi
 

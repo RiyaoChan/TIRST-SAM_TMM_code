@@ -7,7 +7,7 @@ SINGLE_PASS_OUT_DIR=${SINGLE_PASS_OUT_DIR:-${PROJECT_DIR}/outputs_tassg_student}
 TWO_PASS_OUT_DIR=${TWO_PASS_OUT_DIR:-${PROJECT_DIR}/outputs_tassg_twopass_cbga}
 LOG_DIR=${LOG_DIR:-${PROJECT_DIR}/logs}
 POLL_SECONDS=${POLL_SECONDS:-300}
-SINGLE_PASS_EPOCHS=${SINGLE_PASS_EPOCHS:-1000}
+MIN_SINGLE_PASS_EPOCH=${MIN_SINGLE_PASS_EPOCH:-1}
 TWO_PASS_EXTRA_EPOCHS=${TWO_PASS_EXTRA_EPOCHS:-300}
 PYTHON=${PYTHON:-/home/bip/cry/anaconda3/bin/python}
 
@@ -154,7 +154,7 @@ launch_two_pass() {
     cd '${PROJECT_DIR}' &&
     GPU='${gpu}' DATASET='${dataset}' DATA_BASE='${DATA_BASE}' \
     SINGLE_PASS_EXP='${single_exp}' SINGLE_PASS_CKPT='${ckpt}' \
-    SINGLE_PASS_EPOCHS='${SINGLE_PASS_EPOCHS}' TWO_PASS_EXTRA_EPOCHS='${TWO_PASS_EXTRA_EPOCHS}' \
+    TWO_PASS_EXTRA_EPOCHS='${TWO_PASS_EXTRA_EPOCHS}' \
     EXP_NAME='${two_exp}' OUT_DIR='${TWO_PASS_OUT_DIR}' MASK_SUFFIX='${mask_suffix}' \
     PYTHON='${PYTHON}' ./scripts/tmm_train_tassg_twopass_cbga.sh
   " > "${log_file}" 2>&1 &
@@ -188,12 +188,8 @@ while true; do
     fi
 
     latest_epoch=$(latest_epoch_from_log "${single_log}")
-    if (( latest_epoch < SINGLE_PASS_EPOCHS )); then
-      if ! train_process_running_for_exp "${single_exp}" && (( latest_epoch > 0 )); then
-        echo "$(date '+%F %T') ${single_exp} stopped at epoch ${latest_epoch}/${SINGLE_PASS_EPOCHS}; skip ${two_exp}." >&2
-      else
-        echo "$(date '+%F %T') waiting for ${single_exp}: epoch ${latest_epoch}/${SINGLE_PASS_EPOCHS}"
-      fi
+    if (( latest_epoch < MIN_SINGLE_PASS_EPOCH )); then
+      echo "$(date '+%F %T') waiting for ${single_exp}: epoch ${latest_epoch}/${MIN_SINGLE_PASS_EPOCH} before two-pass is eligible"
       continue
     fi
 
