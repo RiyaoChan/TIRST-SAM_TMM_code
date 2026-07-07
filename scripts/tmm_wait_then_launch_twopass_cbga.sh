@@ -64,7 +64,7 @@ latest_epoch_from_log() {
 
 has_log_error() {
   local log_file=$1
-  [[ -f "${log_file}" ]] && grep -E "Traceback \(most recent call last\):|RuntimeError:|torch\.OutOfMemoryError:|CUDA out of memory|loss=nan|loss=NaN|non-finite|Non-finite" "${log_file}" >/dev/null 2>&1
+  [[ -f "${log_file}" ]] && grep -E "Traceback \(most recent call last\):|RuntimeError:|torch\.OutOfMemoryError:|CUDA out of memory|loss=nan|loss=NaN|non-finite|Non-finite|^Terminated$|^Killed$" "${log_file}" >/dev/null 2>&1
 }
 
 train_process_running_for_exp() {
