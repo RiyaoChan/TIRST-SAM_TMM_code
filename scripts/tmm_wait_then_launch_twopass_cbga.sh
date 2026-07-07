@@ -11,13 +11,13 @@ MIN_SINGLE_PASS_EPOCH=${MIN_SINGLE_PASS_EPOCH:-1}
 TWO_PASS_EXTRA_EPOCHS=${TWO_PASS_EXTRA_EPOCHS:-300}
 PYTHON=${PYTHON:-/home/bip/cry/anaconda3/bin/python}
 
-# Free-GPU policy. Override these on launch if needed:
-#   GPU_POOL=0,1,2,3,4,5,6 GPU_MIN_FREE_MB=12000 GPU_MAX_UTIL=15 ./scripts/...
-# Set GPU_MAX_USED_MB=1000 as an additional constraint if you want near-exclusive GPUs.
+# Free-GPU policy. Two-pass CBGA can OOM on shared 3090 cards after encoder unfreeze,
+# so the default only uses near-exclusive idle GPUs. Override on launch if needed:
+#   GPU_POOL=0,1,2,3,4,5,6 GPU_MIN_FREE_MB=22000 GPU_MAX_USED_MB=1000 GPU_MAX_UTIL=5 ./scripts/...
 GPU_POOL=${GPU_POOL:-0,1,2,3,4,5,6}
-GPU_MIN_FREE_MB=${GPU_MIN_FREE_MB:-12000}
-GPU_MAX_USED_MB=${GPU_MAX_USED_MB:-}
-GPU_MAX_UTIL=${GPU_MAX_UTIL:-10}
+GPU_MIN_FREE_MB=${GPU_MIN_FREE_MB:-22000}
+GPU_MAX_USED_MB=${GPU_MAX_USED_MB:-1000}
+GPU_MAX_UTIL=${GPU_MAX_UTIL:-5}
 
 mkdir -p "${LOG_DIR}" "${TWO_PASS_OUT_DIR}"
 cd "${PROJECT_DIR}"
@@ -64,7 +64,7 @@ latest_epoch_from_log() {
 
 has_log_error() {
   local log_file=$1
-  [[ -f "${log_file}" ]] && grep -E "Traceback|RuntimeError|CUDA out of memory|nan|NaN" "${log_file}" >/dev/null 2>&1
+  [[ -f "${log_file}" ]] && grep -E "Traceback \(most recent call last\):|RuntimeError:|torch\.OutOfMemoryError:|CUDA out of memory|loss=nan|loss=NaN|non-finite|Non-finite" "${log_file}" >/dev/null 2>&1
 }
 
 train_process_running_for_exp() {
@@ -88,6 +88,9 @@ two_pass_already_started() {
   local log_file="${LOG_DIR}/${exp_name}.log"
   if train_process_running_for_exp "${exp_name}"; then
     return 0
+  fi
+  if has_log_error "${log_file}"; then
+    return 1
   fi
   if [[ -f "${log_file}" ]] && grep -F "Run directory:" "${log_file}" >/dev/null 2>&1; then
     return 0

@@ -17,6 +17,7 @@ PYTHON=${PYTHON:-/home/bip/cry/anaconda3/bin/python}
 TEXT_SPARSE_NUM_TOKENS=${TEXT_SPARSE_NUM_TOKENS:-1}
 TEXT_SPARSE_PROMPT_SOURCE=${TEXT_SPARSE_PROMPT_SOURCE:-raw_global}
 TEXT_SPARSE_RAW_GLOBAL_GATE=${TEXT_SPARSE_RAW_GLOBAL_GATE:-1}
+BATCH_SIZE=${BATCH_SIZE:-2}
 
 case "${DATASET}" in
   IRSTD-1k) DATASET_SLUG=${DATASET_SLUG:-IRSTD1k} ;;
@@ -74,6 +75,7 @@ fi
 echo "Two-pass resume plan: single_pass_ckpt=${SINGLE_PASS_CKPT}"
 echo "Two-pass resume plan: ckpt_epoch=${CKPT_EPOCH}, target_epochs=${EPOCHS}, actual_extra_epochs=$((EPOCHS - CKPT_EPOCH))"
 echo "Two-pass prompt config: source=${TEXT_SPARSE_PROMPT_SOURCE}, tokens=${TEXT_SPARSE_NUM_TOKENS}, raw_global_gate=${TEXT_SPARSE_RAW_GLOBAL_GATE}"
+echo "Two-pass runtime config: batch_size=${BATCH_SIZE}, cuda_visible_devices=${GPU}"
 
 export CUDA_VISIBLE_DEVICES=${GPU}
 cd "${PROJECT_DIR}"
@@ -104,7 +106,7 @@ cd "${PROJECT_DIR}"
   --prompt_mode assp_only \
   --size 256 \
   --keep_ratio_pad \
-  --batch_size "${BATCH_SIZE:-4}" \
+  --batch_size "${BATCH_SIZE}" \
   --epochs "${EPOCHS}" \
   --model vitt \
   --hq_warmup_epochs 30 \
