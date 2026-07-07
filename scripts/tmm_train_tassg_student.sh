@@ -11,11 +11,32 @@ FEATURE_PATH=${FEATURE_PATH:-${DATA_ROOT}/Qwen3-VL-8B-Instruct_mllm_clip_token_f
 GPU=${GPU:-0}
 EPOCHS=${EPOCHS:-1000}
 BATCH_SIZE=${BATCH_SIZE:-4}
-EXP_NAME=${EXP_NAME:-${DATASET}_TASSG_student_ASSPonly_split50_50}
 OUT_DIR=${OUT_DIR:-${PROJECT_DIR}/outputs_sam_sirst_hq}
 INIT_CKPT=${INIT_CKPT:-${PROJECT_DIR}/weights/efficient_sam_vitt.pt}
 MASK_SUFFIX=${MASK_SUFFIX:-}
 PYTHON=${PYTHON:-/home/bip/cry/anaconda3/bin/python}
+TEXT_SPARSE_NUM_TOKENS=${TEXT_SPARSE_NUM_TOKENS:-1}
+TEXT_SPARSE_PROMPT_SOURCE=${TEXT_SPARSE_PROMPT_SOURCE:-raw_global}
+TEXT_SPARSE_RAW_GLOBAL_GATE=${TEXT_SPARSE_RAW_GLOBAL_GATE:-1}
+
+case "${DATASET}" in
+  IRSTD-1k) DATASET_SLUG=${DATASET_SLUG:-IRSTD1k} ;;
+  NUAA-SIRST) DATASET_SLUG=${DATASET_SLUG:-NUAA} ;;
+  NUDT-SIRST) DATASET_SLUG=${DATASET_SLUG:-NUDT} ;;
+  *) DATASET_SLUG=${DATASET_SLUG:-${DATASET//[^A-Za-z0-9]/}} ;;
+esac
+
+if [[ "${TEXT_SPARSE_PROMPT_SOURCE}" == "fused_tokens" ]]; then
+  PROMPT_TAG=${PROMPT_TAG:-slots${TEXT_SPARSE_NUM_TOKENS}}
+else
+  PROMPT_TAG=${PROMPT_TAG:-global${TEXT_SPARSE_NUM_TOKENS}}
+fi
+EXP_NAME=${EXP_NAME:-${DATASET_SLUG}_TASSG_student_${PROMPT_TAG}_ASSPonly_noGTpoints_split50_50}
+
+TEXT_SPARSE_GATE_ARGS=()
+if [[ "${TEXT_SPARSE_RAW_GLOBAL_GATE}" == "1" || "${TEXT_SPARSE_RAW_GLOBAL_GATE}" == "true" ]]; then
+  TEXT_SPARSE_GATE_ARGS+=(--text_sparse_raw_global_gate)
+fi
 
 export CUDA_VISIBLE_DEVICES=${GPU}
 cd "${PROJECT_DIR}"
@@ -28,9 +49,9 @@ cd "${PROJECT_DIR}"
   --use_mllm_prompt \
   --disable_text_conditioner \
   --use_text_sparse_prompt \
-  --text_sparse_num_tokens 1 \
-  --text_sparse_prompt_source raw_global \
-  --text_sparse_raw_global_gate \
+  --text_sparse_num_tokens "${TEXT_SPARSE_NUM_TOKENS}" \
+  --text_sparse_prompt_source "${TEXT_SPARSE_PROMPT_SOURCE}" \
+  "${TEXT_SPARSE_GATE_ARGS[@]}" \
   --use_tassg \
   --semantic_source student \
   --tassg_num_slots 8 \

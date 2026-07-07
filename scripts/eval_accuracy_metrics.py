@@ -454,6 +454,14 @@ def main():
     )
 
     print(f"Evaluating accurately on the dataset... semantic_source={semantic_source}, mllm_features_path={mllm_features_path}")
+    print(
+        "Deployment contract: "
+        f"Qwen3-VL used during inference={semantic_source == 'teacher'}; "
+        f"CLIP cached feature required during inference={mllm_features_path is not None}; "
+        f"tassg_two_pass_backbone={bool(getattr(args, 'tassg_two_pass_backbone', False) or cmd_args.tassg_two_pass_backbone)}; "
+        f"text_sparse_prompt_source={getattr(args, 'text_sparse_prompt_source', 'fused_tokens')}; "
+        f"text_sparse_num_tokens={getattr(args, 'text_sparse_num_tokens', 1)}"
+    )
     
     thresholds = np.arange(0.05, 1.0, 0.05)
     

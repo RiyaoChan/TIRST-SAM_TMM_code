@@ -10,22 +10,51 @@ VAL_TXT=${VAL_TXT:-50_50/test.txt}
 FEATURE_PATH=${FEATURE_PATH:-${DATA_ROOT}/Qwen3-VL-8B-Instruct_mllm_clip_token_features.pt}
 GPU=${GPU:-0}
 TWO_PASS_EXTRA_EPOCHS=${TWO_PASS_EXTRA_EPOCHS:-300}
-EXP_NAME=${EXP_NAME:-${DATASET}_TASSG_twopassCBGA_ASSPonly_noGTpoints_split50_50}
 OUT_DIR=${OUT_DIR:-${PROJECT_DIR}/outputs_tassg_twopass_cbga}
 INIT_CKPT=${INIT_CKPT:-${PROJECT_DIR}/weights/efficient_sam_vitt.pt}
 MASK_SUFFIX=${MASK_SUFFIX:-}
 PYTHON=${PYTHON:-/home/bip/cry/anaconda3/bin/python}
+TEXT_SPARSE_NUM_TOKENS=${TEXT_SPARSE_NUM_TOKENS:-1}
+TEXT_SPARSE_PROMPT_SOURCE=${TEXT_SPARSE_PROMPT_SOURCE:-raw_global}
+TEXT_SPARSE_RAW_GLOBAL_GATE=${TEXT_SPARSE_RAW_GLOBAL_GATE:-1}
+
+case "${DATASET}" in
+  IRSTD-1k) DATASET_SLUG=${DATASET_SLUG:-IRSTD1k} ;;
+  NUAA-SIRST) DATASET_SLUG=${DATASET_SLUG:-NUAA} ;;
+  NUDT-SIRST) DATASET_SLUG=${DATASET_SLUG:-NUDT} ;;
+  *) DATASET_SLUG=${DATASET_SLUG:-${DATASET//[^A-Za-z0-9]/}} ;;
+esac
+
+if [[ "${TEXT_SPARSE_PROMPT_SOURCE}" == "fused_tokens" ]]; then
+  PROMPT_TAG=${PROMPT_TAG:-slots${TEXT_SPARSE_NUM_TOKENS}}
+else
+  PROMPT_TAG=${PROMPT_TAG:-global${TEXT_SPARSE_NUM_TOKENS}}
+fi
+EXP_NAME=${EXP_NAME:-${DATASET_SLUG}_TASSG_twopassCBGA_${PROMPT_TAG}_ASSPonly_noGTpoints_split50_50}
+
+TEXT_SPARSE_GATE_ARGS=()
+if [[ "${TEXT_SPARSE_RAW_GLOBAL_GATE}" == "1" || "${TEXT_SPARSE_RAW_GLOBAL_GATE}" == "true" ]]; then
+  TEXT_SPARSE_GATE_ARGS+=(--text_sparse_raw_global_gate)
+fi
 
 SINGLE_PASS_OUT_DIR=${SINGLE_PASS_OUT_DIR:-${PROJECT_DIR}/outputs_tassg_student}
-SINGLE_PASS_EXP=${SINGLE_PASS_EXP:-${DATASET}_TASSG_student_ASSPonly_noGTpoints_split50_50}
+SINGLE_PASS_EXP=${SINGLE_PASS_EXP:-${DATASET_SLUG}_TASSG_student_${PROMPT_TAG}_ASSPonly_noGTpoints_split50_50}
 SINGLE_PASS_CKPT=${SINGLE_PASS_CKPT:-}
 
 if [[ -z "${SINGLE_PASS_CKPT}" ]]; then
   shopt -s nullglob
   ckpts=("${SINGLE_PASS_OUT_DIR}/${SINGLE_PASS_EXP}"/*/best.pt)
+  if (( ${#ckpts[@]} == 0 )); then
+    legacy_exp="${DATASET_SLUG}_TASSG_student_ASSPonly_noGTpoints_split50_50"
+    ckpts=("${SINGLE_PASS_OUT_DIR}/${legacy_exp}"/*/best.pt)
+  fi
+  if (( ${#ckpts[@]} == 0 )); then
+    legacy_exp="${DATASET}_TASSG_student_ASSPonly_noGTpoints_split50_50"
+    ckpts=("${SINGLE_PASS_OUT_DIR}/${legacy_exp}"/*/best.pt)
+  fi
   shopt -u nullglob
   if (( ${#ckpts[@]} == 0 )); then
-    echo "Could not find single-pass best.pt under ${SINGLE_PASS_OUT_DIR}/${SINGLE_PASS_EXP}" >&2
+    echo "Could not find single-pass best.pt under ${SINGLE_PASS_OUT_DIR}/${SINGLE_PASS_EXP} or legacy names." >&2
     exit 1
   fi
   SINGLE_PASS_CKPT=$(ls -1t "${ckpts[@]}" | head -n 1)
@@ -42,6 +71,9 @@ if (( EPOCHS <= CKPT_EPOCH )); then
   echo "EPOCHS must be greater than checkpoint epoch. CKPT_EPOCH=${CKPT_EPOCH}, EPOCHS=${EPOCHS}" >&2
   exit 1
 fi
+echo "Two-pass resume plan: single_pass_ckpt=${SINGLE_PASS_CKPT}"
+echo "Two-pass resume plan: ckpt_epoch=${CKPT_EPOCH}, target_epochs=${EPOCHS}, actual_extra_epochs=$((EPOCHS - CKPT_EPOCH))"
+echo "Two-pass prompt config: source=${TEXT_SPARSE_PROMPT_SOURCE}, tokens=${TEXT_SPARSE_NUM_TOKENS}, raw_global_gate=${TEXT_SPARSE_RAW_GLOBAL_GATE}"
 
 export CUDA_VISIBLE_DEVICES=${GPU}
 cd "${PROJECT_DIR}"
@@ -54,9 +86,9 @@ cd "${PROJECT_DIR}"
   --use_mllm_prompt \
   --disable_text_conditioner \
   --use_text_sparse_prompt \
-  --text_sparse_num_tokens 1 \
-  --text_sparse_prompt_source raw_global \
-  --text_sparse_raw_global_gate \
+  --text_sparse_num_tokens "${TEXT_SPARSE_NUM_TOKENS}" \
+  --text_sparse_prompt_source "${TEXT_SPARSE_PROMPT_SOURCE}" \
+  "${TEXT_SPARSE_GATE_ARGS[@]}" \
   --use_tassg \
   --semantic_source student \
   --tassg_two_pass_backbone \

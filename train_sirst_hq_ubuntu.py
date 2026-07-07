@@ -3928,6 +3928,16 @@ def main():
             f"params={n_tassg}",
             args.log_file,
         )
+        log_line(
+            "TASSG deployment contract: "
+            "Qwen3-VL used during training=teacher distillation only; "
+            f"Qwen3-VL used during inference={str(getattr(args, 'semantic_source', 'teacher')).lower() == 'teacher'}; "
+            f"CLIP cached feature required during inference={str(getattr(args, 'semantic_source', 'teacher')).lower() == 'teacher'}; "
+            f"tassg_two_pass_backbone={bool(getattr(args, 'tassg_two_pass_backbone', False))}; "
+            f"text_sparse_prompt_source={getattr(args, 'text_sparse_prompt_source', 'fused_tokens')}; "
+            f"text_sparse_num_tokens={getattr(args, 'text_sparse_num_tokens', 1)}",
+            args.log_file,
+        )
         if str(getattr(args, "semantic_source", "teacher")) == "student" and text_sparse_prompt is None and bifusion_adapter is None and backbone_bifusion_adapter is None and text_conditioner is None:
             log_line(
                 "[warn] --semantic_source student is enabled but no text prompt/fusion module was constructed; TASSG will only add distillation losses.",
@@ -3994,8 +4004,11 @@ def main():
                     best_iou = -1.0
                 log_line(
                     f"Resumed checkpoint: path={resume_path}, checkpoint_epoch={resume_epoch}, "
-                    f"start_epoch={resume_start_epoch}, best_iou={best_iou:.4f}, "
-                    f"missing={len(missing)}, unexpected={len(unexpected)}",
+                    f"start_epoch={resume_start_epoch}, target_epochs={args.epochs}, "
+                    f"actual_extra_epochs={max(0, int(args.epochs) - int(resume_epoch))}, "
+                    f"resume_reset_optimizer={bool(getattr(args, 'resume_reset_optimizer', False))}, "
+                    f"resume_reset_best={bool(getattr(args, 'resume_reset_best', False))}, "
+                    f"best_iou={best_iou:.4f}, missing={len(missing)}, unexpected={len(unexpected)}",
                     args.log_file,
                 )
                 if resume_start_epoch > max(1, unfreeze_epoch):

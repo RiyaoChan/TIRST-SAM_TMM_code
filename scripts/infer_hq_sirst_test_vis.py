@@ -493,6 +493,15 @@ def main():
     split_txt = resolve_split_txt(cli_args.split_txt, data_root, ckpt_args)
     mllm_features_path = resolve_mllm_features_path(data_root, ckpt_args) if semantic_source == "teacher" else None
     feature_store = MLLMFeatureStore(mllm_features_path)
+    print(
+        "Deployment contract: "
+        f"semantic_source={semantic_source}; "
+        f"Qwen3-VL used during inference={semantic_source == 'teacher'}; "
+        f"CLIP cached feature required during inference={mllm_features_path is not None}; "
+        f"tassg_two_pass_backbone={bool(getattr(ckpt_args, 'tassg_two_pass_backbone', False))}; "
+        f"text_sparse_prompt_source={getattr(ckpt_args, 'text_sparse_prompt_source', 'fused_tokens')}; "
+        f"text_sparse_num_tokens={getattr(ckpt_args, 'text_sparse_num_tokens', 1)}"
+    )
 
     out_dir = cli_args.out_dir
     if not out_dir:
@@ -722,6 +731,11 @@ def main():
         "data_root": data_root,
         "split_txt": split_txt,
         "mllm_features_path": mllm_features_path,
+        "qwen_used_during_inference": bool(semantic_source == "teacher"),
+        "clip_cached_feature_required_during_inference": bool(mllm_features_path is not None),
+        "tassg_two_pass_backbone": bool(getattr(ckpt_args, "tassg_two_pass_backbone", False)),
+        "text_sparse_prompt_source": str(getattr(ckpt_args, "text_sparse_prompt_source", "fused_tokens")),
+        "text_sparse_num_tokens": int(getattr(ckpt_args, "text_sparse_num_tokens", 1)),
         "out_dir": out_dir,
         "prompt_mode": prompt_mode,
         "semantic_source": semantic_source,
