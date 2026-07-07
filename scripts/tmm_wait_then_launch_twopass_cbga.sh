@@ -12,9 +12,11 @@ TWO_PASS_EXTRA_EPOCHS=${TWO_PASS_EXTRA_EPOCHS:-300}
 PYTHON=${PYTHON:-/home/bip/cry/anaconda3/bin/python}
 
 # Free-GPU policy. Override these on launch if needed:
-#   GPU_POOL=0,1,2,3,4,5,6 GPU_MAX_USED_MB=1200 GPU_MAX_UTIL=15 ./scripts/...
+#   GPU_POOL=0,1,2,3,4,5,6 GPU_MIN_FREE_MB=12000 GPU_MAX_UTIL=15 ./scripts/...
+# Set GPU_MAX_USED_MB=1000 as an additional constraint if you want near-exclusive GPUs.
 GPU_POOL=${GPU_POOL:-0,1,2,3,4,5,6}
-GPU_MAX_USED_MB=${GPU_MAX_USED_MB:-1000}
+GPU_MIN_FREE_MB=${GPU_MIN_FREE_MB:-12000}
+GPU_MAX_USED_MB=${GPU_MAX_USED_MB:-}
 GPU_MAX_UTIL=${GPU_MAX_UTIL:-10}
 
 mkdir -p "${LOG_DIR}" "${TWO_PASS_OUT_DIR}"
@@ -98,20 +100,25 @@ two_pass_already_started() {
 
 gpu_is_free() {
   local gpu=$1
-  local stats mem util
-  stats=$(nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits |
+  local stats used free util
+  stats=$(nvidia-smi --query-gpu=index,memory.used,memory.free,utilization.gpu --format=csv,noheader,nounits |
     awk -F',' -v target="${gpu}" '
       {
-        gsub(/ /, "", $1); gsub(/ /, "", $2); gsub(/ /, "", $3);
-        if ($1 == target) { print $2 " " $3; exit }
+        gsub(/ /, "", $1); gsub(/ /, "", $2); gsub(/ /, "", $3); gsub(/ /, "", $4);
+        if ($1 == target) { print $2 " " $3 " " $4; exit }
       }')
   if [[ -z "${stats}" ]]; then
     return 1
   fi
-  read -r mem util <<< "${stats}"
-  [[ "${mem}" =~ ^[0-9]+$ ]] || return 1
+  read -r used free util <<< "${stats}"
+  [[ "${used}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${free}" =~ ^[0-9]+$ ]] || return 1
   [[ "${util}" =~ ^[0-9]+$ ]] || return 1
-  (( mem <= GPU_MAX_USED_MB && util <= GPU_MAX_UTIL ))
+  if [[ -n "${GPU_MAX_USED_MB}" ]]; then
+    [[ "${GPU_MAX_USED_MB}" =~ ^[0-9]+$ ]] || return 1
+    (( used <= GPU_MAX_USED_MB )) || return 1
+  fi
+  (( free >= GPU_MIN_FREE_MB && util <= GPU_MAX_UTIL ))
 }
 
 find_free_gpu() {
@@ -198,7 +205,11 @@ while true; do
 
     free_gpu=$(find_free_gpu || true)
     if [[ -z "${free_gpu}" ]]; then
-      echo "$(date '+%F %T') ${two_exp} is ready, but no free GPU in pool ${GPU_POOL} (mem<=${GPU_MAX_USED_MB}MB, util<=${GPU_MAX_UTIL}%)."
+      extra_constraint=""
+      if [[ -n "${GPU_MAX_USED_MB}" ]]; then
+        extra_constraint=", used<=${GPU_MAX_USED_MB}MB"
+      fi
+      echo "$(date '+%F %T') ${two_exp} is ready, but no free GPU in pool ${GPU_POOL} (free>=${GPU_MIN_FREE_MB}MB, util<=${GPU_MAX_UTIL}%${extra_constraint})."
       continue
     fi
 
