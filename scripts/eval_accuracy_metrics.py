@@ -256,6 +256,7 @@ def build_model_from_ckpt(ckpt_path, device):
         bifusion_backbone = build_gated_backbone_bifusion_block_adapter(
             gate_hidden_dim=int(getattr(args, "bifusion_gate_hidden_dim", 0)),
             gate_init_bias=float(getattr(args, "bifusion_gate_init_bias", -2.0)),
+            delta_only=bool(getattr(args, "bifusion_gate_delta_only", False)),
             **common_kwargs,
         ).to(device)
         if hasattr(model.image_encoder, "set_text_block_fuser"):

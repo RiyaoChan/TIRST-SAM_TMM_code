@@ -329,6 +329,7 @@ def build_modules(ckpt_args: SimpleNamespace, device: str):
                 backbone_bifusion_adapter = build_gated_backbone_bifusion_block_adapter(
                     gate_hidden_dim=int(getattr(ckpt_args, "bifusion_gate_hidden_dim", 0)),
                     gate_init_bias=float(getattr(ckpt_args, "bifusion_gate_init_bias", -2.0)),
+                    delta_only=bool(getattr(ckpt_args, "bifusion_gate_delta_only", False)),
                     **common_kwargs,
                 ).to(device)
             else:
