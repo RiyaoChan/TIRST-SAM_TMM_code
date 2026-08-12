@@ -29,6 +29,8 @@ try:
                 return loss
             def step(self, optimizer):
                 optimizer.step()
+            def unscale_(self, optimizer):
+                pass
             def update(self):
                 pass
         return _DummyScaler()
@@ -46,6 +48,8 @@ except Exception:
                 return loss
             def step(self, optimizer):
                 optimizer.step()
+            def unscale_(self, optimizer):
+                pass
             def update(self):
                 pass
         return _DummyScaler()
@@ -1270,6 +1274,11 @@ def train_one_epoch(
     meter_tassg_prompt = 0.0
     meter_tassg_targetness = 0.0
     skipped_nonfinite = 0
+    grad_accum_steps = max(1, int(getattr(args, "grad_accum_steps", 1)))
+    grad_clip_norm = float(getattr(args, "grad_clip_norm", 0.0))
+    accum_count = 0
+    num_batches = len(loader)
+    optimizer.zero_grad(set_to_none=True)
     for batch_idx, batch in enumerate(loader, start=1):
         images = batch["image"].to(device, non_blocking=True)
         masks = batch["mask"].to(device, non_blocking=True)
@@ -1934,16 +1943,39 @@ def train_one_epoch(
         if not torch.isfinite(loss):
             skipped_nonfinite += 1
             optimizer.zero_grad(set_to_none=True)
+            accum_count = 0
             log_line(
                 f"[warn] Skip non-finite loss at epoch {epoch:03d}, batch {batch_idx}",
                 args.log_file,
             )
             continue
 
-        optimizer.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        scaler.scale(loss / float(grad_accum_steps)).backward()
+        accum_count += 1
+        should_step = accum_count >= grad_accum_steps or batch_idx == num_batches
+        if should_step:
+            scaler.unscale_(optimizer)
+            # Correct the final partial accumulation window so it has the same
+            # gradient scale as a full window.
+            if accum_count < grad_accum_steps:
+                correction = float(grad_accum_steps) / float(max(1, accum_count))
+                for group in optimizer.param_groups:
+                    for param in group["params"]:
+                        if param.grad is not None:
+                            param.grad.mul_(correction)
+            if grad_clip_norm > 0.0:
+                params_with_grad = [
+                    param
+                    for group in optimizer.param_groups
+                    for param in group["params"]
+                    if param.grad is not None
+                ]
+                if params_with_grad:
+                    torch.nn.utils.clip_grad_norm_(params_with_grad, grad_clip_norm)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            accum_count = 0
 
         meter_loss += loss.item() * B
         if center_loss_val is not None:
@@ -2427,6 +2459,10 @@ def main():
     p.add_argument("--lr_head", type=float, default=1e-4)
     p.add_argument("--lr_encoder", type=float, default=1e-5)
     p.add_argument("--weight_decay", type=float, default=1e-2)
+    p.add_argument("--grad_accum_steps", type=int, default=1,
+                   help="Accumulate gradients for N micro-batches before an optimizer step.")
+    p.add_argument("--grad_clip_norm", type=float, default=0.0,
+                   help="Clip the global gradient norm after AMP unscaling; <=0 disables clipping.")
     p.add_argument("--out_dir", type=str, default="./outputs_sam_sirst_hq")
     p.add_argument("--exp_name", type=str, default=None)
     p.add_argument("--thr", type=float, default=0.5)
@@ -2961,6 +2997,8 @@ def main():
                    help="Hidden dim for gated backbone BiFusion gates (<=0 uses hidden_dim//4).")
     p.add_argument("--bifusion_gate_init_bias", type=float, default=-2.0,
                    help="Initial bias for gated backbone BiFusion sigmoid gates (negative keeps gates conservative at start).")
+    p.add_argument("--bifusion_gate_delta_only", action="store_true",
+                   help="Project only gated cross-modal deltas in gated backbone BiFusion; preserves identity when gates close and avoids legacy unimodal residual drift.")
     # Freeze/unfreeze strategy configs
     p.add_argument("--freeze_encoder_epochs", type=int, default=-1,
                    help="Freeze image encoder for N epochs first (<=0 to use epochs//4).")
@@ -3863,6 +3901,7 @@ def main():
                     backbone_bifusion_adapter = build_gated_backbone_bifusion_block_adapter(
                         gate_hidden_dim=int(getattr(args, "bifusion_gate_hidden_dim", 0)),
                         gate_init_bias=float(getattr(args, "bifusion_gate_init_bias", -2.0)),
+                        delta_only=bool(getattr(args, "bifusion_gate_delta_only", False)),
                         **common_kwargs,
                     ).to(device)
                 else:
@@ -3879,7 +3918,8 @@ def main():
                     log_line(
                         f"Gated Backbone BiFusion enabled: layers={num_layers}, hidden={args.bifusion_hidden_dim}, "
                         f"heads={args.bifusion_num_heads}, every={getattr(args, 'bifusion_block_apply_every', 1)}, "
-                        f"gate_hidden={getattr(args, 'bifusion_gate_hidden_dim', 0)}, gate_bias={getattr(args, 'bifusion_gate_init_bias', -2.0)}, params={n_bfb}",
+                        f"gate_hidden={getattr(args, 'bifusion_gate_hidden_dim', 0)}, gate_bias={getattr(args, 'bifusion_gate_init_bias', -2.0)}, "
+                        f"delta_only={getattr(args, 'bifusion_gate_delta_only', False)}, params={n_bfb}",
                         args.log_file,
                     )
                 else:

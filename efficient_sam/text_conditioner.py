@@ -861,6 +861,7 @@ class GatedBackboneBiFusionBlockAdapter(BackboneBiFusionBlockAdapter):
         text_res_scale: float = 1.0,
         gate_hidden_dim: int = 0,
         gate_init_bias: float = -2.0,
+        delta_only: bool = False,
     ) -> None:
         super().__init__(
             num_layers=num_layers,
@@ -874,6 +875,10 @@ class GatedBackboneBiFusionBlockAdapter(BackboneBiFusionBlockAdapter):
         )
         self.gate_hidden_dim = max(16, int(gate_hidden_dim) if int(gate_hidden_dim) > 0 else self.hidden_dim // 4)
         self.gate_init_bias = float(gate_init_bias)
+        # Backward compatibility is important for previously trained CBGA
+        # checkpoints, whose output projections consumed the full hidden state.
+        # New stable runs can instead project only the gated cross-modal delta.
+        self.delta_only = bool(delta_only)
 
         self.vision_gates = nn.ModuleList([
             nn.Sequential(
@@ -945,7 +950,8 @@ class GatedBackboneBiFusionBlockAdapter(BackboneBiFusionBlockAdapter):
                 dim=-1,
             )
             v_gate = torch.sigmoid(self.vision_gates[idx](v_gate_in)).unsqueeze(1)
-            v_h_upd = v_h + v_gate * v_delta
+            v_cross_delta = v_gate * v_delta
+            v_h_upd = v_h + v_cross_delta
 
             t_delta, _ = self.t_from_v[idx](
                 query=t_h,
@@ -962,10 +968,27 @@ class GatedBackboneBiFusionBlockAdapter(BackboneBiFusionBlockAdapter):
                 dim=-1,
             )
             t_gate = torch.sigmoid(self.text_gates[idx](t_gate_in)).unsqueeze(1)
-            t_h_upd = t_h + t_gate * t_delta
+            t_cross_delta = t_gate * t_delta
+            t_h_upd = t_h + t_cross_delta
 
-            v_delta_out = self.vision_out_proj(v_h_upd)
-            t_delta_out = self.text_out_proj(t_h_upd)
+            # In the legacy path, projecting v_h_upd/t_h_upd lets the adapter
+            # learn a large unimodal residual even when the cross-modal gates
+            # are nearly closed. Repeating that residual in every ViT block can
+            # collapse the prediction to a dataset-level constant. The stable
+            # path makes the residual genuinely cross-modal: a closed gate now
+            # gives an identity mapping regardless of the output-projection
+            # weights.
+            if self.delta_only:
+                # Do not let the Linear bias bypass the gate: with a regular
+                # Linear, proj(0) == bias and a closed gate would still inject
+                # a learned per-block residual. Keep the bias parameters in
+                # the module/state_dict for legacy-checkpoint compatibility,
+                # but deliberately exclude them in stable mode.
+                v_delta_out = F.linear(v_cross_delta, self.vision_out_proj.weight, bias=None)
+                t_delta_out = F.linear(t_cross_delta, self.text_out_proj.weight, bias=None)
+            else:
+                v_delta_out = self.vision_out_proj(v_h_upd)
+                t_delta_out = self.text_out_proj(t_h_upd)
 
         v_out = orig_v + self.vision_res_scale * v_delta_out.to(orig_v.dtype)
         t_out = orig_t + self.text_res_scale * t_delta_out.to(orig_t.dtype)
@@ -986,6 +1009,7 @@ def build_gated_backbone_bifusion_block_adapter(
     text_res_scale: float = 1.0,
     gate_hidden_dim: int = 0,
     gate_init_bias: float = -2.0,
+    delta_only: bool = False,
 ) -> GatedBackboneBiFusionBlockAdapter:
     return GatedBackboneBiFusionBlockAdapter(
         num_layers=num_layers,
@@ -998,6 +1022,7 @@ def build_gated_backbone_bifusion_block_adapter(
         text_res_scale=text_res_scale,
         gate_hidden_dim=gate_hidden_dim,
         gate_init_bias=gate_init_bias,
+        delta_only=delta_only,
     )
 
 
