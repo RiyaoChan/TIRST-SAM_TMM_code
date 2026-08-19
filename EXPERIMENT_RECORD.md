@@ -1,6 +1,6 @@
 # TIRST-SAM 中文实验记录
 
-最后更新：2026-08-12 08:48 CST
+最后更新：2026-08-19 16:40 CST
 
 本文档只记录已从服务器日志和 checkpoint 名称中核验的实验指标。除非特别说明，表中结果均取验证集 mIoU 最高的 checkpoint，而不是最后一个 epoch。
 
@@ -123,3 +123,76 @@ NUDT-SIRST 旧版结果不能作为已完成的 CBGA 实验引用。从第 11 �
 6. 最终论文结论至少报告三个随机种子，或提供置信区间。
 
 原论文中的完整 CBGA+ASSP 结果使用了不同的提示和训练路径，因此没有混入上述配对表格。只有在评测协议对齐完成后，才能将其作为历史结果进行补充展示。
+
+## 七、E3：GPT 结构化分角色 token → 双稀疏提示，不使用 GT 点提示
+
+### 7.1 修改状态与表示方式
+
+截至 2026-08-19，模型输入已经从“把整段固定描述压成单个 CLIP global embedding”扩展为字段可独立屏蔽的 role-token 缓存。新增生成器为 `scripts/build_structured_role_token_features.py`，首轮主实验只启用固定顺序 `[presence, count]`：
+
+- 每个字段分别构造成自然语言短句并独立通过 CLIP ViT-B/32 文本编码器；
+- 每个字段取各自归一化的 EOT/global 向量，形成一个 `[512]` role token，而不是使用整句的 77 个 CLIP wordpiece token；
+- 缓存张量为 `token_features=[2,512]`、`attention_mask=[2]`，同时保存角色名、角色文本、字段值、字段 mask 和 mask 策略；
+- 被自动审核判错的字段同时执行 `attention_mask=0` 和 token 向量清零，因此不会污染其他正确字段；
+- 缓存仍保存 masked-mean `global_feat` 用于旧接口兼容，但本实验明确使用 `text_sparse_prompt_source=fused_tokens`，不走 `raw_global`；
+- `text_sparse_num_tokens=2`，presence 和 count 分别产生一个 SAM 稀疏提示 token。
+
+`location/size` 已由生成器支持，但未进入首轮主实验。原因是它们的自动核验稳定性低于 presence/count，先作为独立消融，不能重新混入首轮核心条件。`shape/background/contrast` 未进入该缓存。
+
+### 7.2 训练/测试字段 mask 与无 GT 约束
+
+训练集只用 GT mask 判断 GPT 字段是否可信，不用 GT 值替换 GPT 值：
+
+- presence 冲突：两个 role token 都屏蔽；图像和分割 mask 仍用于分割训练，该样本等价于无文本条件；
+- presence 正确、count 冲突：只保留 presence token；
+- presence/count 均正确：保留两个 token；
+- 测试集不运行 GT 审核，直接使用 GPT 的 presence/count 原始字段。
+
+三个测试集 `raw_gpt_inference` 数量恰好等于各自 test split 大小，说明测试 GT 没有进入字段 mask：
+
+| 数据集 | 总样本 | 训练审核样本 | 测试 raw GPT | 训练 presence+count | 训练 presence-only | 训练全屏蔽 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| IRSTD-1k | 1001 | 800 | 201 | 630 | 131 | 39 |
+| NUAA-SIRST | 427 | 213 | 214 | 192 | 14 | 7 |
+| NUDT-SIRST | 1327 | 663 | 664 | 502 | 96 | 65 |
+
+缓存 SHA-256：
+
+| 数据集 | 文件大小（bytes） | SHA-256 |
+| --- | ---: | --- |
+| IRSTD-1k | 4,749,880 | `f4c29dbc06e96046a0daff5c846c33d5aa836a940d848c312e28997623c99ad0` |
+| NUAA-SIRST | 2,026,354 | `fe282a71fa0b27e384800a388a7de330e519f4dc144a1681379c095e6ff2e5b6` |
+| NUDT-SIRST | 6,297,510 | `990cda88e723dcb6250582bba792da18923a6ba9b5218e117e6532f8999b5245` |
+
+### 7.3 本地 smoke test
+
+环境：Windows 本地 RTX 5090 D 32 GB，PyTorch 2.10.0+cu130。IRSTD-1k 完整训练集和测试集运行 1 epoch，成功完成数据加载、前向、反向、阈值搜索、物理指标评估和 checkpoint 保存。加载器实际张量形状为 `[B,2,512]` 与 `[B,2]`，启动日志确认 `source=fused_tokens, tokens=2`。
+
+| epoch | loss | mIoU | nIoU | F1 | Pd | Fa | 用途 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | 1.0136 | 17.97 | 40.11 | 29.60 | 75.66 | 760.13 | 仅管线验证，不作为正式性能结论 |
+
+新增字段 mask/缓存测试 6 项；连同原 GPT 审核测试共 `13 passed`。
+
+### 7.4 正式训练状态
+
+本地串行队列已于 2026-08-19 16:38 CST 启动，三个数据集均计划从同一个 `weights/efficient_sam_vitt.pt` baseline 训练 1000 epochs。统一配置为 256×256、batch size 4、HQ warm-up 30 epochs、编码器冻结 60 epochs、`prompt_mode=assp_only`、`fused_tokens` 和 2 个 role sparse tokens。
+
+- 监督进程 PID：`53020`；
+- 当前数据集：IRSTD-1k；
+- 截至记录时进度：2/1000 epochs；
+- 第 2 轮仅作稳定性观察：loss=0.5993，无 NaN、OOM 或 Traceback；
+- 正式输出：`outputs/model1_gpt5p6_rolepc_sparse2_formal`；
+- 日志：`job_logs/model1_gpt5p6_rolepc_sparse2_20260819`；
+- 可复现启动脚本：`scripts/tmm_train_role_tokens_local.ps1`。
+
+### 7.5 证据边界与待补对照
+
+E3 与旧 E1 不能直接解释为“纯 role-token 增益”：E1 使用整段描述的单个 global embedding、1 个带门控 `raw_global` token；E3 使用两个独立字段向量和 2 个 `fused_tokens` sparse prompts。正式归因至少还需补充：
+
+1. 相同双-token提示接口下的整句/wordpiece 对照；
+2. 同架构、同训练预算的 no-text 对照；
+3. presence-only 与 presence+count 的字段增量消融；
+4. 三个随机种子或置信区间。
+
+当前完成的是反事实行为蒸馏所需的“字段可隔离教师输入”。完整 `C/N/S/W Prompt→Mask` 教师行为缓存及学生蒸馏尚未开始，不能把 E3 记作反事实蒸馏结果。
