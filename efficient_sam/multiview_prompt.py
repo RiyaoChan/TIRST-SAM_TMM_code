@@ -239,10 +239,13 @@ def clusters_to_proposal(
     alpha: float = 1.0,
     beta: float = 0.5,
     gamma: float = 1.0,
+    score_mode: str = "mean_max",
 ) -> PromptProposal:
     """Create A2 mean/max or A3 abstaining proposals from clusters."""
     if gate not in {"none", "rule"}:
         raise ValueError("gate must be 'none' or 'rule'")
+    if score_mode not in {"mean_max", "mean", "max", "support"}:
+        raise ValueError("score_mode must be mean_max, mean, max, or support")
     batch = len(clusters_per_image)
     device = dense_mean.device if dense_mean is not None else torch.device("cpu")
     dtype = dense_mean.dtype if dense_mean is not None else torch.float32
@@ -263,11 +266,16 @@ def clusters_to_proposal(
                 or reliability < float(reliability_threshold)
             ):
                 continue
-            fused_score = (
-                reliability
-                if gate == "rule"
-                else 0.5 * cluster.mean_score + 0.5 * cluster.max_score
-            )
+            if gate == "rule":
+                fused_score = reliability
+            elif score_mode == "mean":
+                fused_score = cluster.mean_score
+            elif score_mode == "max":
+                fused_score = cluster.max_score
+            elif score_mode == "support":
+                fused_score = cluster.support_fraction
+            else:
+                fused_score = 0.5 * cluster.mean_score + 0.5 * cluster.max_score
             selected.append((fused_score, cluster))
         selected.sort(key=lambda item: (-item[0], item[1].center_xy[1], item[1].center_xy[0]))
         selected = selected[:max_candidates]
@@ -304,6 +312,7 @@ def multiview_propose(
     alpha: float = 1.0,
     beta: float = 0.5,
     gamma: float = 1.0,
+    score_mode: str = "mean_max",
 ) -> tuple[PromptProposal, list[list[CandidateCluster]], torch.Tensor, torch.Tensor]:
     """Run one shared generator over stacked views and fuse in image space."""
     batch, _, height, width = images.shape
@@ -352,6 +361,7 @@ def multiview_propose(
         alpha=alpha,
         beta=beta,
         gamma=gamma,
+        score_mode=score_mode,
     )
     proposal.auxiliary["view_maps"] = inverse_maps_tensor
     proposal.auxiliary["variance_map"] = variance_map

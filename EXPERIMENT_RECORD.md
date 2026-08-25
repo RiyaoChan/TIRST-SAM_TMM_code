@@ -274,6 +274,6 @@ E3 与旧 E1 不能直接解释为“纯 role-token 增益”：E1 使用整段�
 
 P0 在 IRSTD-1k 新 validation（80 张）选择 neck probe：tiny Recall@20=84.75%，overall Recall@20=92.31%，False Prompts/MP=220.87，Dense AUPRC=41.52%。它在 tiny recall 上与 DoG/LoG 并列，但 overall recall、False Prompts 和 Dense AUPRC 更优，因此不新增 NativeResolutionPromptHead。
 
-五视图 A2 将 overall/tiny Recall@20 提高到 94.02%/89.83%，但 False Prompts/MP 升到 256.16。只在 validation 调整规则 gate 后，A3 `min_support=2/5, max_dispersion=2 px, tau=0` 达到 Recall@20=96.58%、tiny Recall@20=93.22%、False Prompts/MP=223.35；相对 A2 虚警候选下降 12.81%，召回没有下降。默认 `min_support=3/5` 虽虚警更低，但召回下降超过闸门限制，未被选择。
+五视图 A2 将 overall/tiny Recall@20 提高到 94.02%/89.83%，但 False Prompts/MP 升到 256.16。只在 validation 的缓存 cluster 上搜索 108 个规则组合后，A3 `alpha=0.5, beta=0, gamma=0, min_support=2/5, max_dispersion=2 px, tau=0` 达到 Recall@20=97.44%、tiny Recall@20=94.92%、False Prompts/MP=223.16、Candidate AUPRC=69.92%；相对 A2 虚警候选下降 12.88%，召回没有下降，且 AUPRC 高于 A2-max 的 61.15%。默认 `min_support=3/5` 虽虚警更低，但召回下降超过闸门限制，未被选择。
 
 A0、A1-P、A1-D、A1-DP 的 100-epoch mask 筛选正在运行。A4、NUAA 和 NUDT 尚未启动：必须先等待 mask-level Pd/Fa 闸门，且同一 A3 规则需在 NUAA validation 上方向一致。当前结果仅为 validation 机制筛选，不包含 test 调参或 test 主结果。

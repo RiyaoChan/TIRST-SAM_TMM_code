@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=0.5)
     parser.add_argument("--gamma", type=float, default=1.0)
+    parser.add_argument("--score_mode", choices=("mean_max", "mean", "max", "support"), default="mean_max")
     parser.add_argument("--max_batches", type=int, default=0)
     return parser.parse_args()
 
@@ -170,6 +171,7 @@ def main() -> None:
                     alpha=args.alpha,
                     beta=args.beta,
                     gamma=args.gamma,
+                    score_mode=args.score_mode,
                 )
             prompt_input = "points" if args.mode in {"A0", "A2", "A3"} else str(resolved["prompt_input"])
             points, labels, dense = make_sam_inputs(
@@ -259,6 +261,7 @@ def main() -> None:
             "beta": args.beta,
             "gamma": args.gamma,
         } if args.mode == "A3" else None,
+        "score_mode": args.score_mode,
         "gt_boundary": "GT is used only after proposals and masks are finalized",
     }
     (output_dir / "mask_metrics_summary.json").write_text(

@@ -43,3 +43,13 @@ def test_all_rejected_returns_valid_zero_prompt_fp32_and_fp16():
         assert not proposal.candidate_valid.any()
         assert proposal.candidate_xy.dtype == dtype
 
+
+def test_a2_score_controls_are_explicit_and_deterministic():
+    clusters = [[_cluster(mean_score=0.6, max_score=0.9, support_fraction=0.8)]]
+    dense = torch.zeros((1, 1, 8, 8))
+    expected = {"mean": 0.6, "max": 0.9, "support": 0.8, "mean_max": 0.75}
+    for mode, score in expected.items():
+        proposal = clusters_to_proposal(
+            clusters, dense_mean=dense, gate="none", score_mode=mode
+        )
+        assert torch.isclose(proposal.candidate_scores[0, 0], torch.tensor(score))

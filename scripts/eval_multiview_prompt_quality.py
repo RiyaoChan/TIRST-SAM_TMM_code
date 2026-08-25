@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--score_threshold", type=float, default=0.1)
     parser.add_argument("--cluster_radius", type=float, default=3.0)
     parser.add_argument("--gate", choices=("none", "rule"), default="none")
+    parser.add_argument("--score_mode", choices=("mean_max", "mean", "max", "support"), default="mean_max")
     parser.add_argument("--min_support", type=int, default=3)
     parser.add_argument("--max_dispersion", type=float, default=2.0)
     parser.add_argument("--reliability_threshold", type=float, default=0.0)
@@ -162,6 +163,7 @@ def main() -> None:
                 alpha=args.alpha,
                 beta=args.beta,
                 gamma=args.gamma,
+                score_mode=args.score_mode,
             )
             names = list(batch["name"])
             accumulator.update(proposal, batch["mask"], names)
@@ -209,6 +211,7 @@ def main() -> None:
         "views": list(views),
         "shared_generator_weights": True,
         "gate": args.gate,
+        "score_mode": args.score_mode,
         "candidate_k_raw": args.candidate_k_raw,
         "nms_radius": args.nms_radius,
         "score_threshold": args.score_threshold,
