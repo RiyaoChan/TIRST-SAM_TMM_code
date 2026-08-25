@@ -53,7 +53,7 @@ parser.add_argument('--tassg_dropout', type=float, default=None)
 parser.add_argument('--tassg_img_dim', type=int, default=None)
 parser.add_argument('--tassg_text_dim', type=int, default=None)
 parser.add_argument('--tassg_two_pass_backbone', action='store_true')
-cmd_args = parser.parse_args()
+cmd_args = None
 
 class DictArgs:
     def __init__(self, **entries):
@@ -431,6 +431,9 @@ def inference_logits(model, args, batch, device):
     return logits, mask_label
 
 def main():
+    global cmd_args
+    if cmd_args is None:
+        cmd_args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(device)
     

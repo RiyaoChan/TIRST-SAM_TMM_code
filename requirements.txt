@@ -3,6 +3,7 @@ pillow
 torchvision
 tqdm
 scikit-image
+scikit-learn
 opencv-python
 transformers
 accelerate

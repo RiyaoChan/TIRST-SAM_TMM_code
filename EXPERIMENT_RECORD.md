@@ -1,6 +1,6 @@
 # TIRST-SAM 中文实验记录
 
-最后更新：2026-08-25 10:15 CST
+最后更新：2026-08-25 16:00 CST
 
 本文档只记录已从服务器日志和 checkpoint 名称中核验的实验指标。除非特别说明，表中结果均取验证集 mIoU 最高的 checkpoint，而不是最后一个 epoch。
 
@@ -225,3 +225,41 @@ E3 与旧 E1 不能直接解释为“纯 role-token 增益”：E1 使用整段�
 5. 使用固定 `center/resize` 而非随机验证裁剪，对所有最佳 checkpoint 进行确定性重评。
 
 当前完成的是反事实行为蒸馏所需的“字段可隔离教师输入”。完整 `C/N/S/W Prompt→Mask` 教师行为缓存及学生蒸馏尚未开始，不能把 E3 记作反事实蒸馏结果。
+
+## 八、E4：文本反事实 `C/N/S/W/O` 确定性诊断
+
+2026-08-25 已使用同一个 E3 best checkpoint 在 IRSTD-1k 与 NUAA-SIRST 上完成低成本诊断。五种条件共享同一次 image encoder forward；评测固定 `sc_eval_crop=resize`，使用零长度 point prompts，`C/N/S/W` 不读取评测 GT，只有 `O` 使用 GT presence/count 并标为不可部署上界。下表统一采用 `N` 条件选择的固定阈值。
+
+| 数据集 | 条件 | global IoU | mean IoU | F1 | Pd | Fa | mask AUPRC |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| IRSTD-1k | C | 61.28 | 51.71 | 63.78 | 84.88 | 22.39 | 74.36 |
+| IRSTD-1k | N | 60.04 | 51.81 | 64.01 | 86.25 | 28.16 | 72.34 |
+| IRSTD-1k | S | 61.26 | 51.69 | 63.77 | 84.88 | 22.39 | 74.37 |
+| IRSTD-1k | W | 61.28 | 51.71 | 63.78 | 84.88 | 22.39 | 74.36 |
+| IRSTD-1k | O | 61.30 | 51.72 | 63.79 | 84.88 | 22.24 | 74.36 |
+| NUAA-SIRST | C | 66.51 | 62.93 | 75.76 | 92.78 | 3.57 | 78.09 |
+| NUAA-SIRST | N | 66.49 | 62.91 | 75.74 | 92.78 | 3.57 | 78.08 |
+| NUAA-SIRST | S | 66.51 | 62.93 | 75.76 | 92.78 | 3.57 | 78.09 |
+| NUAA-SIRST | W | 66.51 | 62.93 | 75.76 | 92.78 | 3.57 | 78.09 |
+| NUAA-SIRST | O | 66.51 | 62.93 | 75.76 | 92.78 | 3.57 | 78.09 |
+
+逐图 `C-N` mean-IoU 差值：IRSTD-1k 为 -0.10 个百分点，bootstrap 95% CI `[-1.19,+0.99]`；NUAA-SIRST 为 +0.02 个百分点，95% CI `[-0.02,+0.07]`。两个 CI 均跨 0。`C/S/W/O` 的 sparse embeddings 虽有差异，但最终概率图几乎不变，说明当前 decoder 主要响应 token 是否激活，而没有可靠使用文本内容或图文对应关系。
+
+因此暂停 Prompt→Mask 反事实增量蒸馏，不启动 B4/B5。完整协议、逐图统计、表示距离与产物路径见 `docs/experiments/10_TEXT_COUNTERFACTUAL_DIAGNOSTIC_20260825.md`。
+
+### 8.1 匹配 no-text 筛选探针
+
+2026-08-25 12:35 CST，IRSTD-1k 100-epoch null-token 训练探针已完成。模型保留与 E3 相同的 2-token projector 及 395,520 个参数，仅将输入 role features 与 attention mask 清零；从同一 baseline 初始化，验证固定 `sc_eval_crop=resize`。输出位于 `outputs/model1_matched_null_probe_20260825`，日志位于 `job_logs/model1_matched_null_probe_20260825`，stderr 为空，无 NaN、Inf、OOM、RuntimeError 或 Traceback。
+
+训练日志中的最佳 checkpoint 为 epoch 95：global IoU=59.22、mean IoU=49.46、F1=61.66、Pd=83.85、Fa=23.61，阈值为 0.41。第 100 轮为 global IoU=57.79、mean IoU=49.76、F1=62.01、Pd=89.00、Fa=39.00，依照预注册规则仍保留 epoch 95。
+
+为统一评测实现，又使用 E4 确定性评测器分别评浏 null-token epoch 95 的 `N` 条件和 E3 epoch 97 的 `C` 条件。两者均为 100-epoch 筛选范围内的最佳已保存 checkpoint，固定 `resize`，且各自选择一个数据集级固定阈值：
+
+| 100-epoch 探针 | 条件 | 阈值 | global IoU | mean IoU | F1 | Pd | Fa | mask AUPRC |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| E3 role token, epoch 97 | C | 0.95 | 55.47 | 50.01 | 61.96 | 85.22 | 54.05 | 69.98 |
+| matched null token, epoch 95 | N | 0.30 | 58.17 | 48.93 | 61.23 | 84.88 | 27.41 | 72.77 |
+
+与 null-token 相比，E3-100 的 mean IoU 仅高 1.08 个百分点，但 global IoU 低 2.70 个百分点、Fa 高 26.65、AUPRC 低 2.79 个百分点，是明显的混合胜负。原 E3 的 checkpoint 是依随机验证裁剪保存，null-token 依固定 `resize` 保存，且当前只有单种子，因此该表只能用于筛选，不能声称任一方显著更优。
+
+结合 8.0 中 `C≈S≈W≈O` 的直接证据，当前不将上述差异归因于文本语义，也不扩展 NUAA-SIRST/null-token 三种子。反事实行为蒸馏保持停止，下一主线转向高分辨率视觉 self-prompt；文本只保留为需先证明能验证候选或降低 Fa 的可拒绝可选 gate。
