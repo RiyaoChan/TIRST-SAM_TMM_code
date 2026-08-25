@@ -263,3 +263,17 @@ E3 与旧 E1 不能直接解释为“纯 role-token 增益”：E1 使用整段�
 与 null-token 相比，E3-100 的 mean IoU 仅高 1.08 个百分点，但 global IoU 低 2.70 个百分点、Fa 高 26.65、AUPRC 低 2.79 个百分点，是明显的混合胜负。原 E3 的 checkpoint 是依随机验证裁剪保存，null-token 依固定 `resize` 保存，且当前只有单种子，因此该表只能用于筛选，不能声称任一方显著更优。
 
 结合 8.0 中 `C≈S≈W≈O` 的直接证据，当前不将上述差异归因于文本语义，也不扩展 NUAA-SIRST/null-token 三种子。反事实行为蒸馏保持停止，下一主线转向高分辨率视觉 self-prompt；文本只保留为需先证明能验证候选或降低 Fa 的可拒绝可选 gate。
+
+## 九、Experiment 1：可靠性校准的视觉 Self-Prompt
+
+2026-08-25 已完成旧 self-prompt 路径审计、干净 split、统一 proposal/metrics、无 GT 泄漏测试、20-epoch early/mid/neck probe 和 IRSTD-1k prompt-level A1–A3。完整记录见：
+
+- `docs/experiments/11_SELF_PROMPT_CODE_AND_PROTOCOL_AUDIT.md`；
+- `docs/experiments/12_PROMPT_GENERATOR_SCREENING.md`；
+- `docs/experiments/13_MULTIVIEW_RELIABILITY_EXPERIMENT.md`。
+
+P0 在 IRSTD-1k 新 validation（80 张）选择 neck probe：tiny Recall@20=84.75%，overall Recall@20=92.31%，False Prompts/MP=220.87，Dense AUPRC=41.52%。它在 tiny recall 上与 DoG/LoG 并列，但 overall recall、False Prompts 和 Dense AUPRC 更优，因此不新增 NativeResolutionPromptHead。
+
+五视图 A2 将 overall/tiny Recall@20 提高到 94.02%/89.83%，但 False Prompts/MP 升到 256.16。只在 validation 调整规则 gate 后，A3 `min_support=2/5, max_dispersion=2 px, tau=0` 达到 Recall@20=96.58%、tiny Recall@20=93.22%、False Prompts/MP=223.35；相对 A2 虚警候选下降 12.81%，召回没有下降。默认 `min_support=3/5` 虽虚警更低，但召回下降超过闸门限制，未被选择。
+
+A0、A1-P、A1-D、A1-DP 的 100-epoch mask 筛选正在运行。A4、NUAA 和 NUDT 尚未启动：必须先等待 mask-level Pd/Fa 闸门，且同一 A3 规则需在 NUAA validation 上方向一致。当前结果仅为 validation 机制筛选，不包含 test 调参或 test 主结果。
