@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import random
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -281,6 +282,30 @@ def compact_metrics(metrics: dict) -> dict:
     return {key: value for key, value in metrics.items() if key != "prompt_metrics"}
 
 
+def prompt_selection_key(prompt_result: dict) -> tuple[float, float, float, float]:
+    at20 = next(row for row in prompt_result["budget_rows"] if int(row["budget"]) == 20)
+    tiny20 = next(
+        row
+        for row in prompt_result["area_rows"]
+        if row["area_bin"] == "1-9" and int(row["budget"]) == 20
+    )
+    return (
+        float(tiny20["component_recall"]),
+        float(at20["component_recall"]),
+        -float(at20["false_prompts_per_million_pixels"]),
+        float(prompt_result["summary"]["dense_prompt_auprc"]),
+    )
+
+
+def current_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data_root", required=True)
@@ -339,7 +364,12 @@ def main() -> None:
             "weights_sha256": sha256_file(weights),
             "self_prompt_gt_policy": "none",
             "text_features": None,
-            "checkpoint_selection": "validation global IoU; fixed segmentation threshold",
+            "checkpoint_selection": {
+                "mask": "validation global IoU; fixed segmentation threshold",
+                "prompt": "tiny Recall@20, overall Recall@20, lower False Prompts/MP, Dense AUPRC",
+            },
+            "command_argv": [sys.executable, *sys.argv],
+            "git_commit": current_git_commit(),
         }
     )
     if args.probe_checkpoint:
@@ -406,6 +436,9 @@ def main() -> None:
     best_iou = -math.inf
     best_epoch = -1
     best_metrics = None
+    best_prompt_key = None
+    best_prompt_epoch = -1
+    best_prompt_metrics = None
     history = []
 
     for epoch in range(1, args.epochs + 1):
@@ -471,6 +504,22 @@ def main() -> None:
                     json.dumps(prompt_result["summary"], ensure_ascii=False, indent=2, allow_nan=True) + "\n",
                     encoding="utf-8",
                 )
+            prompt_key = prompt_selection_key(metrics["prompt_metrics"])
+            if best_prompt_key is None or prompt_key > best_prompt_key:
+                best_prompt_key = prompt_key
+                best_prompt_epoch = epoch
+                best_prompt_metrics = copy.deepcopy(compact_metrics(metrics))
+                torch.save(
+                    {
+                        "schema_version": 1,
+                        "epoch": epoch,
+                        "model_state": model.state_dict(),
+                        "metrics": best_prompt_metrics,
+                        "prompt_selection_key": list(prompt_key),
+                        "resolved_args": resolved,
+                    },
+                    output_dir / "best_prompt.pt",
+                )
         history.append(record)
         with (output_dir / "history.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, allow_nan=True) + "\n")
@@ -480,7 +529,10 @@ def main() -> None:
         "completed_epochs": args.epochs,
         "best_epoch": best_epoch,
         "best_metrics": best_metrics,
-        "selection_metric": "validation global IoU",
+        "best_prompt_epoch": best_prompt_epoch,
+        "best_prompt_metrics": best_prompt_metrics,
+        "best_prompt_selection_key": list(best_prompt_key) if best_prompt_key is not None else None,
+        "selection_metric": resolved["checkpoint_selection"],
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=True) + "\n", encoding="utf-8"
