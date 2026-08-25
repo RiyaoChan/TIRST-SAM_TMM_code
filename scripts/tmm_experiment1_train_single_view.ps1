@@ -28,4 +28,3 @@ $arguments = @(
 if ($LASTEXITCODE -ne 0) {
     throw "Experiment 1 single-view training failed with exit code $LASTEXITCODE"
 }
-

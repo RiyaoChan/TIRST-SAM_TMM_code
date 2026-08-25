@@ -75,4 +75,3 @@ if ($A1Checkpoint) {
         Invoke-CheckedPython $maskArguments
     }
 }
-
