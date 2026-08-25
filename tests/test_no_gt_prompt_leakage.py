@@ -12,6 +12,9 @@ from efficient_sam.prompt_proposal import (
     DoGLoGProposalAdapter,
     PGAPProposalAdapter,
 )
+from efficient_sam.multiview_prompt import multiview_propose, rule_reliability
+from scripts.eval_prompt_quality import enforce_test_config_freeze
+from scripts.train_experiment1_single_view import ImageOnlyProposalGenerator
 
 
 class _IdentityHead(nn.Module):
@@ -24,6 +27,23 @@ def test_proposal_forward_signatures_do_not_accept_masks_or_points():
     for adapter in (PGAPProposalAdapter, DoGLoGProposalAdapter, DenseHeadProposalAdapter):
         parameters = set(inspect.signature(adapter.forward).parameters)
         assert not parameters.intersection(forbidden), (adapter.__name__, parameters)
+    for callable_object in (
+        ImageOnlyProposalGenerator.__call__,
+        multiview_propose,
+        rule_reliability,
+    ):
+        parameters = set(inspect.signature(callable_object).parameters)
+        assert not parameters.intersection(forbidden), (callable_object, parameters)
+
+
+def test_strict_image_only_generator_rejects_gt_keyword_before_sampling():
+    sampler = object.__new__(ImageOnlyProposalGenerator)
+    try:
+        sampler(None, None, None, gt_mask=torch.ones(1, 1, 8, 8))
+    except TypeError as error:
+        assert "gt_mask" in str(error)
+    else:
+        raise AssertionError("Image-only generator unexpectedly accepted gt_mask")
 
 
 def test_dense_proposal_is_invariant_to_external_gt_changes():
@@ -58,3 +78,26 @@ def test_all_adapters_allow_zero_prompt_outputs():
     assert torch.count_nonzero(coords) == 0
     assert torch.all(labels == -1)
 
+
+def test_image_only_proposal_is_bitwise_deterministic():
+    torch.manual_seed(7)
+    images = torch.rand((2, 1, 32, 32))
+    adapter = DoGLoGProposalAdapter(
+        candidate_k_raw=8, nms_radius=3.0, score_threshold=0.1
+    )
+    first = adapter(images)
+    second = adapter(images)
+    assert torch.equal(first.dense_probs, second.dense_probs)
+    assert torch.equal(first.candidate_xy, second.candidate_xy)
+    assert torch.equal(first.candidate_valid, second.candidate_valid)
+
+
+def test_test_split_requires_frozen_validation_config():
+    enforce_test_config_freeze("val", None)
+    enforce_test_config_freeze("test", "frozen-val-config.json")
+    try:
+        enforce_test_config_freeze("test", None)
+    except ValueError as error:
+        assert "frozen_config_manifest" in str(error)
+    else:
+        raise AssertionError("Test split was allowed to enter an unfrozen selection run")

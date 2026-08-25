@@ -55,6 +55,11 @@ def parse_budgets(value: str) -> tuple[int, ...]:
     return values
 
 
+def enforce_test_config_freeze(split_role: str, frozen_config_manifest: str | None) -> None:
+    if split_role == "test" and not frozen_config_manifest:
+        raise ValueError("Test evaluation requires --frozen_config_manifest from validation selection")
+
+
 def write_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -129,8 +134,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.split_role == "test" and not args.frozen_config_manifest:
-        raise ValueError("Test evaluation requires --frozen_config_manifest from validation selection")
+    enforce_test_config_freeze(args.split_role, args.frozen_config_manifest)
     if args.generator == "probe" and not args.probe_checkpoint:
         raise ValueError("--generator probe requires --probe_checkpoint")
     set_deterministic(int(args.seed))
