@@ -22,6 +22,12 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     return float(numerator / denominator) if denominator > 0 else float("nan")
 
 
+def _safe_nanmean(values: Sequence[float]) -> float:
+    array = np.asarray(list(values), dtype=np.float64)
+    finite = array[np.isfinite(array)]
+    return float(finite.mean()) if finite.size else float("nan")
+
+
 def _safe_average_precision(labels: Sequence[int], scores: Sequence[float]) -> float:
     labels_array = np.asarray(labels, dtype=np.int64)
     if labels_array.size == 0 or np.unique(labels_array).size < 2:
@@ -313,7 +319,7 @@ class PromptMetricAccumulator:
                         "components": len(rows),
                         "component_recall": _safe_ratio(hits, len(rows)),
                         "mean_maximum_response": (
-                            float(np.nanmean([row["max_response"] for row in rows]))
+                            _safe_nanmean([row["max_response"] for row in rows])
                             if rows
                             else float("nan")
                         ),
@@ -342,13 +348,11 @@ class PromptMetricAccumulator:
             ),
             "dense_prompt_auprc": dense_auprc,
             "dense_prompt_auroc": dense_auroc,
-            "mean_peak_to_background_contrast": float(
-                np.nanmean(
-                    [row.get("peak_to_background_contrast", float("nan")) for row in self.per_image_rows]
-                )
+            "mean_peak_to_background_contrast": _safe_nanmean(
+                [row.get("peak_to_background_contrast", float("nan")) for row in self.per_image_rows]
             ),
-            "mean_gt_component_maximum_response": float(
-                np.nanmean([row.get("max_response", float("nan")) for row in self.per_component_rows])
+            "mean_gt_component_maximum_response": _safe_nanmean(
+                [row.get("max_response", float("nan")) for row in self.per_component_rows]
             ),
             "budgets": list(self.budgets),
             "matching": {

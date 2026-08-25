@@ -25,7 +25,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from efficient_sam.efficient_sam_hq import build_efficient_sam_hq
 from efficient_sam.prompt_metrics import PromptMetricAccumulator
-from efficient_sam.prompt_proposal import DenseHeadProposalAdapter, DoGLoGProposalAdapter, PGAPProposalAdapter
+from efficient_sam.prompt_proposal import (
+    DenseHeadProposalAdapter,
+    DoGLoGProposalAdapter,
+    PGAPProposalAdapter,
+    PromptProposal,
+)
 from efficient_sam.prompt_training import SpatialProbeHead
 from scripts.eval_prompt_quality import select_probe_features
 from sirst_dataset import make_loader
@@ -105,9 +110,12 @@ class ImageOnlyProposalGenerator:
 
     def __init__(self, args, device: torch.device):
         self.kind = args.generator
+        self.args_candidate_k_raw = int(args.candidate_k_raw)
         self.level = None
         self.head = None
-        if self.kind == "pgap":
+        if self.kind == "null":
+            self.adapter = None
+        elif self.kind == "pgap":
             self.adapter = PGAPProposalAdapter(
                 candidate_k_raw=args.candidate_k_raw,
                 nms_radius=args.nms_radius,
@@ -146,6 +154,19 @@ class ImageOnlyProposalGenerator:
         neck: torch.Tensor,
         multi_scale: list[torch.Tensor] | None,
     ):
+        if self.kind == "null":
+            batch = int(images.shape[0])
+            candidate_k_raw = int(self.args_candidate_k_raw)
+            return PromptProposal(
+                dense_logits=None,
+                dense_probs=None,
+                candidate_xy=images.new_zeros((batch, candidate_k_raw, 2)),
+                candidate_scores=images.new_zeros((batch, candidate_k_raw)),
+                candidate_valid=torch.zeros(
+                    (batch, candidate_k_raw), dtype=torch.bool, device=images.device
+                ),
+                candidate_source=[["null"] * candidate_k_raw for _ in range(batch)],
+            ).validate()
         if self.kind in {"pgap", "doglog"}:
             return self.adapter(images)
         if multi_scale is None:
@@ -268,7 +289,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--weights", default="weights/efficient_sam_vitt.pt")
     parser.add_argument("--mask_suffix", default="")
-    parser.add_argument("--generator", choices=("pgap", "doglog", "probe"), required=True)
+    parser.add_argument("--generator", choices=("null", "pgap", "doglog", "probe"), required=True)
     parser.add_argument("--probe_checkpoint", default=None)
     parser.add_argument("--prompt_input", choices=("points", "dense", "dense_points"), default="points")
     parser.add_argument("--prompt_budget", type=int, default=5)
