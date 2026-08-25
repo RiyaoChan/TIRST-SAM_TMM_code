@@ -1,6 +1,6 @@
 # TIRST-SAM 中文实验记录
 
-最后更新：2026-08-19 16:40 CST
+最后更新：2026-08-25 10:15 CST
 
 本文档只记录已从服务器日志和 checkpoint 名称中核验的实验指标。除非特别说明，表中结果均取验证集 mIoU 最高的 checkpoint，而不是最后一个 epoch。
 
@@ -178,21 +178,50 @@ NUDT-SIRST 旧版结果不能作为已完成的 CBGA 实验引用。从第 11 �
 
 本地串行队列已于 2026-08-19 16:38 CST 启动，三个数据集均计划从同一个 `weights/efficient_sam_vitt.pt` baseline 训练 1000 epochs。统一配置为 256×256、batch size 4、HQ warm-up 30 epochs、编码器冻结 60 epochs、`prompt_mode=assp_only`、`fused_tokens` 和 2 个 role sparse tokens。
 
-- 监督进程 PID：`53020`；
-- 当前数据集：IRSTD-1k；
-- 截至记录时进度：2/1000 epochs；
-- 第 2 轮仅作稳定性观察：loss=0.5993，无 NaN、OOM 或 Traceback；
+- 串行监督队列已正常结束；
+- IRSTD-1k 已于 2026-08-20 04:31 CST 完成 1000 epochs；
+- NUAA-SIRST 已于 2026-08-20 10:24 CST 完成 1000 epochs；
+- NUDT-SIRST 已于 2026-08-20 23:30 CST 完成 1000 epochs；
+- 三个日志均未发现 NaN、Inf、OOM、RuntimeError 或 Traceback；
+- 2026-08-25 10:15 CST 再次交叉核验三个日志、`best.pt` 元数据与命名 checkpoint，最佳 epoch 和指标均一致；
 - 正式输出：`outputs/model1_gpt5p6_rolepc_sparse2_formal`；
 - 日志：`job_logs/model1_gpt5p6_rolepc_sparse2_20260819`；
 - 可复现启动脚本：`scripts/tmm_train_role_tokens_local.ps1`。
 
-### 7.5 证据边界与待补对照
+结果均按验证集 mIoU 最高的 checkpoint 记录；`Fa` 单位为 `×10^-6`。
+
+| 数据集 | 进度 | 最佳 epoch | mIoU | nIoU | F1 | Pd | Fa | 状态 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| IRSTD-1k | 1000/1000 | 768 | 74.14 | 73.39 | 61.43 | 94.61 | 8.05 | 已完成 |
+| NUAA-SIRST | 1000/1000 | 991 | 74.93 | 77.75 | 82.56 | 93.60 | 39.15 | 已完成 |
+| NUDT-SIRST | 1000/1000 | 982 | 93.46 | 94.35 | 96.76 | 99.37 | 1.65 | 已完成 |
+
+最佳 checkpoint 文件：
+
+- IRSTD-1k：`best_ep768_miou74p14_niou73p39_f161p43_pd94p61_fa8p05.pt`；
+- NUAA-SIRST：`best_ep991_miou74p93_niou77p75_f182p56_pd93p60_fa39p15.pt`；
+- NUDT-SIRST：`best_ep982_miou93p46_niou94p35_f196p76_pd99p37_fa1p65.pt`。
+
+### 7.5 E3 与旧 E1 的最终配对比较
+
+`ΔmIoU/nIoU/F1/Pd` 为正表示 E3 更高；`ΔFa` 为负表示 E3 虚警更少。
+
+| 数据集 | ΔmIoU | ΔnIoU | ΔF1 | ΔPd | ΔFa | 当前解释 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| IRSTD-1k | -0.70 | -4.14 | +5.64 | -0.47 | -13.89 | F1 与 Fa 明显改善，但 nIoU 下降 |
+| NUAA-SIRST | -0.41 | +0.25 | -1.17 | -2.48 | +11.34 | IoU 基本相当，但 Pd、F1 和 Fa 变差 |
+| NUDT-SIRST | +0.38 | +0.45 | +0.26 | 0.00 | -0.56 | IoU、F1 和 Fa 小幅改善，Pd 持平 |
+
+当前证据不支持“presence/count role token 在三个数据集上稳定优于整句 global embedding”的结论。IRSTD-1k 显示更高 F1、更低 Fa，但 nIoU 下降；NUAA-SIRST 的 IoU 接近 E1，但 F1、Pd 和 Fa 变差；NUDT-SIRST 则在 IoU、F1 和 Fa 上取得小幅改善。整体效果具有明显的数据集依赖性。
+
+### 7.6 证据边界与待补对照
 
 E3 与旧 E1 不能直接解释为“纯 role-token 增益”：E1 使用整段描述的单个 global embedding、1 个带门控 `raw_global` token；E3 使用两个独立字段向量和 2 个 `fused_tokens` sparse prompts。正式归因至少还需补充：
 
 1. 相同双-token提示接口下的整句/wordpiece 对照；
 2. 同架构、同训练预算的 no-text 对照；
 3. presence-only 与 presence+count 的字段增量消融；
-4. 三个随机种子或置信区间。
+4. 三个随机种子或置信区间；
+5. 使用固定 `center/resize` 而非随机验证裁剪，对所有最佳 checkpoint 进行确定性重评。
 
 当前完成的是反事实行为蒸馏所需的“字段可隔离教师输入”。完整 `C/N/S/W Prompt→Mask` 教师行为缓存及学生蒸馏尚未开始，不能把 E3 记作反事实蒸馏结果。
