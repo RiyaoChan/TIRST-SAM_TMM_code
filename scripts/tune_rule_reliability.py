@@ -186,10 +186,14 @@ def main() -> None:
     if missing:
         raise ValueError(f"Cluster CSV contains names absent from split: {missing[:5]}")
 
-    max_result = evaluate_config(
-        grouped_rows, masks, "max", 0, 0, 0, 1, math.inf, 0, args.max_candidates
-    )
-    max_metrics = summarize(max_result)
+    control_metrics = {}
+    for mode in ("max", "mean", "support"):
+        control_metrics[mode] = summarize(
+            evaluate_config(
+                grouped_rows, masks, mode, 0, 0, 0, 1, math.inf, 0, args.max_candidates
+            )
+        )
+    max_metrics = control_metrics["max"]
     a1_budget, a1_tiny = reference_at20(Path(args.a1_reference_dir).resolve())
     a2_budget, _ = reference_at20(Path(args.a2_reference_dir).resolve())
     a1_tiny_recall = float(a1_tiny["component_recall"])
@@ -262,6 +266,7 @@ def main() -> None:
             "a2_false_prompts_per_mp_at_20": a2_false,
             "max_score_candidate_auprc": max_metrics["candidate_auprc"],
         },
+        "controls": control_metrics,
         "grid_size": len(sweep_rows),
         "passing_configs": len(passing),
         "selected": selected,

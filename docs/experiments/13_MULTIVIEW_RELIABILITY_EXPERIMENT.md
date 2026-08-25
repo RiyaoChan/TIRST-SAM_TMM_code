@@ -38,6 +38,15 @@ False Prompts/MP、mean candidates 和 tiny recall 均按 K=20 报告。
 
 因此 A3 在 prompt-level 通过全部已可计算闸门。108 个组合中有 24 个同时满足虚警下降、overall/tiny recall 和优于 max-score AUPRC 的约束；按“先通过全部闸门，再选择最低 False Prompts/MP@20，随后比较 tiny/overall recall 与 AUPRC”的预注册顺序得到上述规则。默认 `support≥3` 虽将 False Prompts/MP 降低 35.22%，但相对 A2 的 Recall@20 下降 1.71 个百分点，超过 0.5pp 限制，所以不选。
 
+规则分数与简单排序控制如下；它们都从同一份缓存 cluster 计算，不重复运行 encoder。
+
+| Score | Candidate AUPRC | Recall@20 | Tiny Recall@20 | False Prompts/MP@20 |
+|---|---:|---:|---:|---:|
+| max score | 0.61149 | 0.95726 | 0.91525 | 255.78 |
+| mean score | 0.45235 | 0.93162 | 0.88136 | 256.35 |
+| support only | 0.35223 | 0.93162 | 0.86441 | 256.35 |
+| **A3 selected rule** | **0.69916** | **0.97436** | **0.94915** | **223.16** |
+
 该结论还不是最终 A3 通过：仍需等待 A1 100-epoch mask checkpoint，使用同一模型分别评估 A1/A2/A3 的 global IoU、mean nIoU、F1、Pd 与 Fa。只有最终 Fa/Pd 也符合条件，并且同一规则在 NUAA-SIRST validation 上方向一致，才允许训练 A4 ReliabilityHead。
 
 ## 4. DoG/LoG 提前诊断
