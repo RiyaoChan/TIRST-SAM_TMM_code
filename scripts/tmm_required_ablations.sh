@@ -38,6 +38,10 @@ EPOCHS="${EPOCHS:-1000}"
 MODEL="${MODEL:-vitt}"
 SPLIT_DIR="${SPLIT_DIR:-50_50}"
 BASELINE_WEIGHTS="${BASELINE_WEIGHTS:-weights/efficient_sam_vitt.pt}"
+MLLM_FEATURE_FILE="${MLLM_FEATURE_FILE:-Qwen3-VL-8B-Instruct_mllm_clip_token_features.pt}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-0.0}"
+CBGA_DELTA_ONLY="${CBGA_DELTA_ONLY:-1}"
 
 cd "$PROJECT_DIR"
 mkdir -p "$LOG_ROOT"
@@ -54,7 +58,8 @@ common_args() {
     --train_txt "${SPLIT_DIR}/train.txt" \
     --val_txt "${SPLIT_DIR}/test.txt" \
     --size "$SIZE" --keep_ratio_pad \
-    --batch_size "$BS" --epochs "$EPOCHS" --model "$MODEL" \
+    --batch_size "$BS" --grad_accum_steps "$GRAD_ACCUM_STEPS" \
+    --grad_clip_norm "$GRAD_CLIP_NORM" --epochs "$EPOCHS" --model "$MODEL" \
     --hq_warmup_epochs 30 --freeze_encoder_epochs 60 \
     --sctransnet_preproc --sc_use_gamma --sc_pos_prob 0.5 \
     --val_thr_search --pd_fa_dist 3 \
@@ -79,16 +84,21 @@ strategy_args() {
 mllm_args() {
   local root="$1"
   echo --use_mllm_prompt --disable_text_conditioner \
-    --mllm_features_path "${root}/Qwen3-VL-8B-Instruct_mllm_clip_token_features.pt"
+    --mllm_features_path "${root}/${MLLM_FEATURE_FILE}"
 }
 
 cbga_args() {
+  local delta_only_args=()
+  if [[ "$CBGA_DELTA_ONLY" == "1" ]]; then
+    delta_only_args+=(--bifusion_gate_delta_only)
+  fi
   echo --use_gated_bifusion_backbone_blocks \
     --bifusion_hidden_dim 128 --bifusion_num_heads 4 \
     --bifusion_block_apply_every 1 \
     --bifusion_block_vision_res_scale 1.0 \
     --bifusion_block_text_res_scale 1.0 \
-    --bifusion_gate_hidden_dim 0 --bifusion_gate_init_bias -2.0
+    --bifusion_gate_hidden_dim 0 --bifusion_gate_init_bias -2.0 \
+    "${delta_only_args[@]}"
 }
 
 plain_bifusion_args() {

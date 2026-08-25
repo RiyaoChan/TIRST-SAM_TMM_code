@@ -53,7 +53,7 @@ parser.add_argument('--tassg_dropout', type=float, default=None)
 parser.add_argument('--tassg_img_dim', type=int, default=None)
 parser.add_argument('--tassg_text_dim', type=int, default=None)
 parser.add_argument('--tassg_two_pass_backbone', action='store_true')
-cmd_args = parser.parse_args()
+cmd_args = None
 
 class DictArgs:
     def __init__(self, **entries):
@@ -256,6 +256,7 @@ def build_model_from_ckpt(ckpt_path, device):
         bifusion_backbone = build_gated_backbone_bifusion_block_adapter(
             gate_hidden_dim=int(getattr(args, "bifusion_gate_hidden_dim", 0)),
             gate_init_bias=float(getattr(args, "bifusion_gate_init_bias", -2.0)),
+            delta_only=bool(getattr(args, "bifusion_gate_delta_only", False)),
             **common_kwargs,
         ).to(device)
         if hasattr(model.image_encoder, "set_text_block_fuser"):
@@ -430,6 +431,9 @@ def inference_logits(model, args, batch, device):
     return logits, mask_label
 
 def main():
+    global cmd_args
+    if cmd_args is None:
+        cmd_args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(device)
     

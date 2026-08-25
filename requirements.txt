@@ -3,7 +3,9 @@ pillow
 torchvision
 tqdm
 scikit-image
+scikit-learn
 opencv-python
 transformers
 accelerate
-
+openai
+git+https://github.com/openai/CLIP.git

@@ -220,6 +220,7 @@ def main():
         bifusion_backbone = build_gated_backbone_bifusion_block_adapter(
             gate_hidden_dim=int(getattr(args, "bifusion_gate_hidden_dim", 0)),
             gate_init_bias=float(getattr(args, "bifusion_gate_init_bias", -2.0)),
+            delta_only=bool(getattr(args, "bifusion_gate_delta_only", False)),
             **common_kwargs,
         ).to(device)
         model.image_encoder.bifusion_adapter = bifusion_backbone

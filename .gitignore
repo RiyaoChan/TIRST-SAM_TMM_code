@@ -12,4 +12,4 @@ analysis_outputs/
 tmp*/
 *.log
 *.cmd
-
+job_logs/
