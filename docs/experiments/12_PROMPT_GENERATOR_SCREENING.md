@@ -50,6 +50,15 @@ Neck probe 被选为 A1 generator：
 
 三个最佳 probe 分别来自：early epoch 13、mid epoch 19、neck epoch 15。原始 checkpoint 和完整 CSV 位于忽略版本控制的 `outputs/experiment1_p0/IRSTD-1k/`。
 
+同一 neck checkpoint 连续运行三次固定 validation 评测，四类核心产物的 SHA-256 均逐字节一致：
+
+| Artifact | 三次共同 SHA-256 |
+|---|---|
+| `candidate_budget_curve.csv` | `fa75c3f7e839f47d287540291ca3acd51d28af9710c2cc8b4df6c827b24b7fc4` |
+| `area_bin_metrics.csv` | `df62d56ebedaa27146572905de43f86a98c3e44ec585b3992ca9f1e502f28d84` |
+| `prompt_metrics_per_image.csv` | `5eaed6802d712d1e801110b9f73ba3c3841415b79ea42548c7e65967313a4456` |
+| `prompt_metrics_per_component.csv` | `5895513a45b8ac4b5b74787a75f9f61ad5e38a6365e2b7ca6e4500e138c38015` |
+
 ```powershell
 python scripts/train_prompt_probes.py `
   --data_root <IRSTD-1k> `
@@ -65,4 +74,3 @@ python scripts/eval_prompt_quality.py `
 ```
 
 本表只报告 validation 机制筛选结果，尚未运行 test；不得与旧 test-as-validation 数字直接合并。
-
