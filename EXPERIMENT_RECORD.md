@@ -1,6 +1,6 @@
 # TIRST-SAM 中文实验记录
 
-最后更新：2026-08-25 16:00 CST
+最后更新：2026-08-26 CST
 
 本文档只记录已从服务器日志和 checkpoint 名称中核验的实验指标。除非特别说明，表中结果均取验证集 mIoU 最高的 checkpoint，而不是最后一个 epoch。
 
@@ -353,3 +353,29 @@ IR-SAM2、PMG-SAM、LDFSAM属于本轮来源策略排除的MDPI工作，没有�
 6. MUP-SAM的辅助分割→box→MedSAM链路可image-only部署，但其大幅增益主要由后端fusion带来；后续对比必须隔离prompt质量与额外分割/fusion容量。
 
 本次仍未新增训练、性能结果或核心模型代码。下一步先执行M0/M1、T0、R0/R1零训练诊断；全文回填没有改变“机制过闸门后才做20/100 epoch训练、当前不做1000 epoch”的结论。
+
+## 十一、MicroQuery-SAM 固定候选诊断与 M2-S1
+
+2026-08-26 已按 `experiments_guide/TIRST_SAM_MICROQUERY_SAM_EXPERIMENT_PLAN_FOR_CODEX_V2.md` 完成 IRSTD-1k 的 P0、M0、M1 和 M2-S1。实验固定 A1 single-view neck probe 候选、A1-P best-mask checkpoint、seed 20260825 与 720/80 train/val split；部署推理不使用 GT。GT 只存在于物理隔离的 analysis 标签、训练 loss、matcher 和 metrics 中。
+
+validation 共 117 个 GT components。A1-P encoder 对应的 Candidate Coverage@5/10/20 为 94.02%/95.73%/95.73%，tiny 1–9 px coverage 为 88.14%/91.53%/91.53%。这些数值来自正式 best-mask encoder，与早期 probe-only P0 结果不是同一缓存。
+
+M0 在相同预测候选上比较 one-query 和 independent-query。K=10 时，CTR 从 89.29% 提高到 92.86%，但 Fa 从 53.60 增到 90.98×10^-6，global IoU 从 53.15% 降到 50.31%，因此可部署 M0 未通过。GT Oracle filter 在 K=10 达到 CTR 92.86%、TCR 100%、Fa 35.29×10^-6，证明候选级拒绝存在上界，但不可部署。
+
+M1 Oracle point 相对 Null 将 Pd 从 76.07% 提高到 90.60%、mean nIoU 从 44.81% 提高到 51.38%，说明 decoder 响应 point。GT micro-mask/point+micro-mask 未通过 tiny 闸门：tiny Best Query IoU 相对 point −4.13pp、tiny component detection −6.78pp，因此未实现 M2 micro-mask head。
+
+M2-S1 使用 frozen shallow/neck ROI descriptor，只训练 183,177 参数的 object/no-object 与 quality head，20 epochs，best epoch 18，K=10。objectness semantic AUPRC 为 92.82%，比 raw candidate 82.53% 高 10.29pp。validation-selected object threshold=0.15、mask threshold=0.5 时结果如下：
+
+| 条件 | CTR | TCR | FCRR | DSR | global IoU | mean nIoU | Pd | Fa ×10^-6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| M2-1 independent all | 92.86% | 100% | 0% | 0% | 50.34% | 46.79% | 89.74% | 90.98 |
+| M2-2 object hard gate | 92.86% | 95.54% | 83.86% | 44.44% | 54.37% | 50.25% | 88.89% | 43.87 |
+
+M2-2 将 Fa 降低 51.78%、CTR 保持不变，并改善 IoU，但 TCR 下降 4.46pp、Pd 下降 0.85pp。它属于“背景候选识别有效但真候选误拒过多”，未通过 `TCR下降≤0.5pp` 的严格门控，不能称为 M2-2 有效。zero descriptor 退化到 all-accept 基线；batch-shuffled descriptor 的 TCR 为 69.64%；wrong/inverted objectness 的 TCR 为 33.93%，证明 head 确实消费候选内容，但不能修复安全性问题。
+
+因此停止 M2-S2 100 epochs、三随机种子、NUAA/NUDT M3、micro-mask、latent token 和 reliability 扩展，也不消费 test split。完整协议和结果见：
+
+- `docs/experiments/14_MICROQUERY_PROTOCOL_AND_CANDIDATE_CONTEXT.md`；
+- `docs/experiments/15_MICROQUERY_M0_M1_DIAGNOSTIC.md`；
+- `docs/experiments/16_MICROQUERY_M2_RESULTS.md`；
+- `docs/experiments/17_MICROQUERY_M3_FINAL_VALIDATION.md`。
