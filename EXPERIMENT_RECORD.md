@@ -293,3 +293,48 @@ A2 相对 A1-P 将 global IoU 提高 0.49pp、Fa 降低 23.81%，但 Pd 下降 1
 按预注册 A3 六项闸门，IRSTD prompt-level 的五项可计算条件通过，但 NUAA-SIRST 同规则方向尚未验证；同时 mask-level 收益不稳定。因此 A3 完整闸门未通过，A4、NUDT-SIRST 与多随机种子长训练均未启动。当前证据指向 prompt encoder/decoder 对候选排序变化响应不足，A3 暂作为分析模块而不是主模型。
 
 关键 best-mask SHA-256：A0 `722c7f7838aeca5517a54af6791662342aade8222392243a7db9111bfe39388b`，A1-P `6320c5e2a68aa934b92b869998d826463b630f560f96e4257391deebabc9a904`，A1-D `e94fefa22cd116f149f197544d90e5c9197dfa6f8ace9918d9717853a728ead8`。完整分层结论、失败边界、运行路径与复现命令见 `docs/experiments/13_MULTIVIEW_RELIABILITY_EXPERIMENT.md`。
+
+## 十、Self-Prompt 文献深读与下一阶段机制闸门
+
+2026-08-26 按 `experiments_guide/TIRST_SAM_SELF_PROMPT_LITERATURE_READING_FOR_CODEX.md` 完成文献身份核验、S级全文阅读、指定仓库代码审计、当前失败对照、候选Idea与Top-3最小实验设计。本节**只记录文献/机制结论，没有新增训练或性能结果，也未修改核心模型**。
+
+交付文档：
+
+- `docs/self_prompt/00_SOURCE_VERIFICATION.md`：任务书68个编号、53篇独立工作的身份/全文/代码/许可证核验；
+- `docs/self_prompt/01_SELF_PROMPT_PAPER_MATRIX.md`：prompt表示、no-object/background、decoder消费和部署依赖矩阵；
+- `docs/self_prompt/02_S_TIER_DEEP_READING.md`：18个S级条目，其中14篇基于全文；
+- `docs/self_prompt/03_REFERENCE_CODE_PATH_AUDIT.md`：15个指定仓库中14个完成真实forward/loss/inference审计；
+- `docs/self_prompt/04_CURRENT_FAILURE_VS_LITERATURE.md`：PR #3逐环节失败诊断；
+- `docs/self_prompt/05_IDEA_CANDIDATES.md`：12个可证伪候选；
+- `docs/self_prompt/06_NOVELTY_COLLISION_AUDIT.md`：与SPARK-SAM、IP-SAM、SAM-SPL、MaskSAM等的冲突边界；
+- `docs/self_prompt/07_TOP3_MINIMAL_EXPERIMENTS.md`：只读/oracle优先的低成本预注册计划；
+- `references/self_prompt_related.bib`：已核验的非排除来源BibTeX。
+
+### 10.1 文献导出的主结论
+
+1. 当前A3的核心失败不是prompt-level候选还不够准，而是候选进入SAM后丢失身份、background、no-object和reliability；`[B,1,K,2]`把多目标/错误点混入一个query。
+2. “图像生成prompt”“浅层高分辨率self-prompt”“前/背景prompt”“response adaptation”“one-query-one-mask/no-object”均已有直接先例；不能把其中任何单项写成首次。
+3. 下一步必须先证明decoder消费prompt：correct/zero/shuffled/wrong、reliability置零/随机、one-query vs multi-query、candidate drop和oracle micro-mask是必做反事实。
+4. SAM-SPL是纯视觉IRSTD self-prompt直接基线；SPARK-SAM是IRSTD prompt–response adaptation直接近邻；IP-SAM是前/背景prompt-space直接近邻；MaskSAM/RSPrompter是object-set/no-object直接近邻。
+5. 继续更换显著性算子、调Top-K/NMS、增加deterministic views或训练support/dispersion MLP均停止作为主创新。
+
+### 10.2 Top-3待证伪方向
+
+| 优先级 | 方向 | 一句话机制 | 首要停止条件 |
+|---:|---|---|---|
+| 1 | MicroQuery-SAM | 每候选独立query+micro-mask+`∅`，以objectness×reliability×SAM-IoU聚合 | oracle independent-query也不优于one-query |
+| 2 | TB-Prompt | 每候选保持target/background成对状态直到decoder，并做wrong/shuffled background反事实 | correct background不优于shuffled或持续过抑制tiny目标 |
+| 3 | RQ-Adapt | 用首轮独立mask response预测accept/refine/reject，而不是继续调candidate score | response AUPRC不优于原candidate score，oracle reject也不能降Fa |
+
+### 10.3 执行闸门
+
+下一阶段先运行零训练的M0/M1、T0、R0/R1缓存诊断。只有某条在两个validation split达到预注册Fa/Pd/IoU门槛，才进入20-epoch sanity和100-epoch三随机种子筛选。**不直接启动1000 epochs**；机制闸门不过时，延长训练没有研究价值。
+
+### 10.4 待用户补齐材料
+
+- PromptPilot论文PDF与supplementary（OpenReview被验证页拦截）；
+- Semantic AutoSAM正式4页PDF；
+- SAM-SPL正式TGRS PDF与supplementary；
+- AlignSAM源码压缩包或新的官方仓库链接（指定GitHub链接404）。
+
+IR-SAM2、PMG-SAM、LDFSAM属于本轮来源策略排除的MDPI工作，没有进入证据、引用和新颖性评分；如需比较，应单独建立用户指定附录。
