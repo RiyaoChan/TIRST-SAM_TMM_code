@@ -263,3 +263,93 @@ E3 与旧 E1 不能直接解释为“纯 role-token 增益”：E1 使用整段�
 与 null-token 相比，E3-100 的 mean IoU 仅高 1.08 个百分点，但 global IoU 低 2.70 个百分点、Fa 高 26.65、AUPRC 低 2.79 个百分点，是明显的混合胜负。原 E3 的 checkpoint 是依随机验证裁剪保存，null-token 依固定 `resize` 保存，且当前只有单种子，因此该表只能用于筛选，不能声称任一方显著更优。
 
 结合 8.0 中 `C≈S≈W≈O` 的直接证据，当前不将上述差异归因于文本语义，也不扩展 NUAA-SIRST/null-token 三种子。反事实行为蒸馏保持停止，下一主线转向高分辨率视觉 self-prompt；文本只保留为需先证明能验证候选或降低 Fa 的可拒绝可选 gate。
+
+## 九、Experiment 1：可靠性校准的视觉 Self-Prompt
+
+2026-08-25 已完成旧 self-prompt 路径审计、干净 split、统一 proposal/metrics、无 GT 泄漏测试、20-epoch early/mid/neck probe 和 IRSTD-1k prompt-level A1–A3。完整记录见：
+
+- `docs/experiments/11_SELF_PROMPT_CODE_AND_PROTOCOL_AUDIT.md`；
+- `docs/experiments/12_PROMPT_GENERATOR_SCREENING.md`；
+- `docs/experiments/13_MULTIVIEW_RELIABILITY_EXPERIMENT.md`。
+
+P0 在 IRSTD-1k 新 validation（80 张）选择 neck probe：tiny Recall@20=84.75%，overall Recall@20=92.31%，False Prompts/MP=220.87，Dense AUPRC=41.52%。它在 tiny recall 上与 DoG/LoG 并列，但 overall recall、False Prompts 和 Dense AUPRC 更优，因此不新增 NativeResolutionPromptHead。
+
+五视图 A2 将 overall/tiny Recall@20 提高到 94.02%/89.83%，但 False Prompts/MP 升到 256.16。只在 validation 的缓存 cluster 上搜索 108 个规则组合后，A3 `alpha=0.5, beta=0, gamma=0, min_support=2/5, max_dispersion=2 px, tau=0` 达到 Recall@20=97.44%、tiny Recall@20=94.92%、False Prompts/MP=223.16、Candidate AUPRC=69.92%；相对 A2 虚警候选下降 12.88%，召回没有下降，且 AUPRC 高于 A2-max 的 61.15%。默认 `min_support=3/5` 虽虚警更低，但召回下降超过闸门限制，未被选择。
+
+100-epoch mask 筛选与统一评测已于 2026-08-26 完成。所有数值来自 IRSTD-1k 新 validation（80 张）、seed 20260825、固定 resize 与 segmentation threshold 0.5；`Fa` 单位为 `×10^-6`。A2/A3 复用 A1-P 的 best-mask checkpoint，只改变推理期 prompt 形成方式。
+
+| Run | Prompt | Best epoch | global IoU | mean nIoU | F1 | Pd | Fa | latency (ms/image) | 状态 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| A0 | null/no spatial prompt | 82 | 56.02 | 47.86 | 60.34 | 88.89 | 50.54 | 26.88 | 完成 |
+| A1-P | 单视图 positive points | 84 | 55.61 | 48.13 | 60.20 | 88.03 | 44.06 | 25.10 | 完成；A2/A3 主线 |
+| A1-D | 单视图 dense targetness | 88 | 55.62 | 49.52 | 61.37 | 86.32 | 39.67 | 25.07 | 完成 |
+| A2 | 五视图 mean/max points | 84 | **56.09** | 48.01 | 60.11 | 86.32 | **33.57** | 106.25 | 完成 |
+| A3 | 五视图 rule-gated points | 84 | 55.58 | **48.70** | **60.86** | **87.18** | 40.44 | 106.52 | 完成 |
+
+A1-P 和 A1-D 均没有整体超过 A0。A1-DP 在 60/100 epochs 后于第 61 轮发生 CUDA OOM；其部分 checkpoint 不进入正式比较。因为预注册主线要求逐点拒绝，而 A1-D 没有显著更强且未实现逐样本 `dense_prompt_valid`，A1-DP 不可能改变 A1-P 主线选择，所以不重跑。
+
+A2 相对 A1-P 将 global IoU 提高 0.49pp、Fa 降低 23.81%，但 Pd 下降 1.71pp；相对 A0 的 IoU 只高 0.07pp，Pd 低 2.56pp。A3 相对 A2 的 prompt-level False Prompts/MP 下降 12.88%、Recall@20 提高 3.42pp，但最终 mask 的 global IoU 下降 0.52pp、Fa 增加 20.45%，只有 mean nIoU、F1 和 Pd 上升。由此只能主张多视图/规则改变了低虚警—检出权衡，不能主张 A3 全面改善最终分割。
+
+按预注册 A3 六项闸门，IRSTD prompt-level 的五项可计算条件通过，但 NUAA-SIRST 同规则方向尚未验证；同时 mask-level 收益不稳定。因此 A3 完整闸门未通过，A4、NUDT-SIRST 与多随机种子长训练均未启动。当前证据指向 prompt encoder/decoder 对候选排序变化响应不足，A3 暂作为分析模块而不是主模型。
+
+关键 best-mask SHA-256：A0 `722c7f7838aeca5517a54af6791662342aade8222392243a7db9111bfe39388b`，A1-P `6320c5e2a68aa934b92b869998d826463b630f560f96e4257391deebabc9a904`，A1-D `e94fefa22cd116f149f197544d90e5c9197dfa6f8ace9918d9717853a728ead8`。完整分层结论、失败边界、运行路径与复现命令见 `docs/experiments/13_MULTIVIEW_RELIABILITY_EXPERIMENT.md`。
+
+## 十、Self-Prompt 文献深读与下一阶段机制闸门
+
+2026-08-26 按 `experiments_guide/TIRST_SAM_SELF_PROMPT_LITERATURE_READING_FOR_CODEX.md` 完成文献身份核验、S级全文阅读、指定仓库代码审计、当前失败对照、候选Idea与Top-3最小实验设计。本节**只记录文献/机制结论，没有新增训练或性能结果，也未修改核心模型**。
+
+交付文档：
+
+- `docs/self_prompt/00_SOURCE_VERIFICATION.md`：任务书68个编号、53篇独立工作的身份/全文/代码/许可证核验；
+- `docs/self_prompt/01_SELF_PROMPT_PAPER_MATRIX.md`：prompt表示、no-object/background、decoder消费和部署依赖矩阵；
+- `docs/self_prompt/02_S_TIER_DEEP_READING.md`：18个S级条目，其中16篇基于全文；
+- `docs/self_prompt/03_REFERENCE_CODE_PATH_AUDIT.md`：15个指定仓库中14个完成真实forward/loss/inference审计；
+- `docs/self_prompt/04_CURRENT_FAILURE_VS_LITERATURE.md`：PR #3逐环节失败诊断；
+- `docs/self_prompt/05_IDEA_CANDIDATES.md`：12个可证伪候选；
+- `docs/self_prompt/06_NOVELTY_COLLISION_AUDIT.md`：与SPARK-SAM、IP-SAM、SAM-SPL、MaskSAM等的冲突边界；
+- `docs/self_prompt/07_TOP3_MINIMAL_EXPERIMENTS.md`：只读/oracle优先的低成本预注册计划；
+- `docs/self_prompt/08_LOCAL_PDF_SUPPLEMENT.md`：用户补充的6篇全文逐项机制、数字与路线影响；
+- `references/self_prompt_related.bib`：已核验的非排除来源BibTeX。
+
+### 10.1 文献导出的主结论
+
+1. 当前A3的核心失败不是prompt-level候选还不够准，而是候选进入SAM后丢失身份、background、no-object和reliability；`[B,1,K,2]`把多目标/错误点混入一个query。
+2. “图像生成prompt”“浅层高分辨率self-prompt”“前/背景prompt”“response adaptation”“one-query-one-mask/no-object”均已有直接先例；不能把其中任何单项写成首次。
+3. 下一步必须先证明decoder消费prompt：correct/zero/shuffled/wrong、reliability置零/随机、one-query vs multi-query、candidate drop和oracle micro-mask是必做反事实。
+4. SAM-SPL是纯视觉IRSTD self-prompt直接基线；SPARK-SAM是IRSTD prompt–response adaptation直接近邻；IP-SAM是前/背景prompt-space直接近邻；MaskSAM/RSPrompter是object-set/no-object直接近邻。补充全文进一步确认DVPT已覆盖local/global visual prompt、AutoPromptSeg已覆盖低不确定性自动筛点、S4M已覆盖点角色embedding、PromptPilot已覆盖多轮response与GT-LOO credit。
+5. 继续更换显著性算子、调Top-K/NMS、增加deterministic views或训练support/dispersion MLP均停止作为主创新。
+
+### 10.2 Top-3待证伪方向
+
+| 优先级 | 方向 | 一句话机制 | 首要停止条件 |
+|---:|---|---|---|
+| 1 | MicroQuery-SAM | 每候选独立query+micro-mask+`∅`，以objectness×reliability×SAM-IoU聚合 | oracle independent-query也不优于one-query |
+| 2 | TB-Prompt | 每候选保持target/background成对状态直到decoder，并做wrong/shuffled background反事实 | correct background不优于shuffled或持续过抑制tiny目标 |
+| 3 | RQ-Adapt | 无reference、无在线GT、非RL地用首轮独立mask response预测accept/refine/reject | response AUPRC不优于candidate score/AutoPromptSeg式UQ排序，或oracle reject不能降Fa |
+
+### 10.3 执行闸门
+
+下一阶段先运行零训练的M0/M1、T0、R0/R1缓存诊断。只有某条在两个validation split达到预注册Fa/Pd/IoU门槛，才进入20-epoch sanity和100-epoch三随机种子筛选。**不直接启动1000 epochs**；机制闸门不过时，延长训练没有研究价值。
+
+### 10.4 待用户补齐材料
+
+- Semantic AutoSAM正式4页PDF；
+- SAM-RSIS正式PDF或supplementary；
+- AlignSAM源码压缩包或新的官方仓库链接（指定GitHub链接404）。
+
+IR-SAM2、PMG-SAM、LDFSAM属于本轮来源策略排除的MDPI工作，没有进入证据、引用和新颖性评分；如需比较，应单独建立用户指定附录。
+
+### 10.5 用户补充全文回填（2026-08-26）
+
+已完整核读`paper/`下PromptPilot、SAM-SPL、AutoPromptSeg、MUP-SAM、S4M和DVPT六篇全文；S级18项中全文覆盖由14项提高到16项。PDF仅作本地证据源，不提交仓库，也不在版本库文档写入用户绝对路径。
+
+新增证据对实验路线的实际影响：
+
+1. SAM-SPL已完成图像-only浅层dense self-prompt，并在IRSTD-1K报告74.09 IoU；仅做shallow feature→dense token不再具有新颖性，且必须成为纯视觉直接基线。
+2. DVPT已覆盖冻结SAM中的local dense prompt与global group tokens；“让CLIP图像编码器生成一个全局文本/视觉特征”不能单独成为贡献，语义分支若继续只能落到candidate/字段级因果验证。
+3. AutoPromptSeg已覆盖epistemic/aleatoric uncertainty、低不确定性NMS与Top-K自动点；EviSet或reliability若只在decoder外排序，属于高碰撞，实验必须加入UQ-ranking强控制并证明状态进入独立mask。
+4. S4M证明结构化正点的role/type embedding会显著影响结果；TB-Prompt增加shared/specific/shuffled role控制，但S4M仍是人工交互方法，不能解决新图像无prompt问题。
+5. PromptPilot已用SAM DSC与训练期GT leave-one-out边际贡献训练多agent prompt优化；CreditDrop降级为oracle诊断，RQ-Adapt只保留“无reference、无在线GT、非RL、单次refine/reject”的窄路线，并必须优于candidate score和UQ ranking。
+6. MUP-SAM的辅助分割→box→MedSAM链路可image-only部署，但其大幅增益主要由后端fusion带来；后续对比必须隔离prompt质量与额外分割/fusion容量。
+
+本次仍未新增训练、性能结果或核心模型代码。下一步先执行M0/M1、T0、R0/R1零训练诊断；全文回填没有改变“机制过闸门后才做20/100 epoch训练、当前不做1000 epoch”的结论。
