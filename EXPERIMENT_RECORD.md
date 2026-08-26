@@ -276,4 +276,20 @@ P0 在 IRSTD-1k 新 validation（80 张）选择 neck probe：tiny Recall@20=84.
 
 五视图 A2 将 overall/tiny Recall@20 提高到 94.02%/89.83%，但 False Prompts/MP 升到 256.16。只在 validation 的缓存 cluster 上搜索 108 个规则组合后，A3 `alpha=0.5, beta=0, gamma=0, min_support=2/5, max_dispersion=2 px, tau=0` 达到 Recall@20=97.44%、tiny Recall@20=94.92%、False Prompts/MP=223.16、Candidate AUPRC=69.92%；相对 A2 虚警候选下降 12.88%，召回没有下降，且 AUPRC 高于 A2-max 的 61.15%。默认 `min_support=3/5` 虽虚警更低，但召回下降超过闸门限制，未被选择。
 
-A0、A1-P、A1-D、A1-DP 的 100-epoch mask 筛选正在运行。A4、NUAA 和 NUDT 尚未启动：必须先等待 mask-level Pd/Fa 闸门，且同一 A3 规则需在 NUAA validation 上方向一致。当前结果仅为 validation 机制筛选，不包含 test 调参或 test 主结果。
+100-epoch mask 筛选与统一评测已于 2026-08-26 完成。所有数值来自 IRSTD-1k 新 validation（80 张）、seed 20260825、固定 resize 与 segmentation threshold 0.5；`Fa` 单位为 `×10^-6`。A2/A3 复用 A1-P 的 best-mask checkpoint，只改变推理期 prompt 形成方式。
+
+| Run | Prompt | Best epoch | global IoU | mean nIoU | F1 | Pd | Fa | latency (ms/image) | 状态 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| A0 | null/no spatial prompt | 82 | 56.02 | 47.86 | 60.34 | 88.89 | 50.54 | 26.88 | 完成 |
+| A1-P | 单视图 positive points | 84 | 55.61 | 48.13 | 60.20 | 88.03 | 44.06 | 25.10 | 完成；A2/A3 主线 |
+| A1-D | 单视图 dense targetness | 88 | 55.62 | 49.52 | 61.37 | 86.32 | 39.67 | 25.07 | 完成 |
+| A2 | 五视图 mean/max points | 84 | **56.09** | 48.01 | 60.11 | 86.32 | **33.57** | 106.25 | 完成 |
+| A3 | 五视图 rule-gated points | 84 | 55.58 | **48.70** | **60.86** | **87.18** | 40.44 | 106.52 | 完成 |
+
+A1-P 和 A1-D 均没有整体超过 A0。A1-DP 在 60/100 epochs 后于第 61 轮发生 CUDA OOM；其部分 checkpoint 不进入正式比较。因为预注册主线要求逐点拒绝，而 A1-D 没有显著更强且未实现逐样本 `dense_prompt_valid`，A1-DP 不可能改变 A1-P 主线选择，所以不重跑。
+
+A2 相对 A1-P 将 global IoU 提高 0.49pp、Fa 降低 23.81%，但 Pd 下降 1.71pp；相对 A0 的 IoU 只高 0.07pp，Pd 低 2.56pp。A3 相对 A2 的 prompt-level False Prompts/MP 下降 12.88%、Recall@20 提高 3.42pp，但最终 mask 的 global IoU 下降 0.52pp、Fa 增加 20.45%，只有 mean nIoU、F1 和 Pd 上升。由此只能主张多视图/规则改变了低虚警—检出权衡，不能主张 A3 全面改善最终分割。
+
+按预注册 A3 六项闸门，IRSTD prompt-level 的五项可计算条件通过，但 NUAA-SIRST 同规则方向尚未验证；同时 mask-level 收益不稳定。因此 A3 完整闸门未通过，A4、NUDT-SIRST 与多随机种子长训练均未启动。当前证据指向 prompt encoder/decoder 对候选排序变化响应不足，A3 暂作为分析模块而不是主模型。
+
+关键 best-mask SHA-256：A0 `722c7f7838aeca5517a54af6791662342aade8222392243a7db9111bfe39388b`，A1-P `6320c5e2a68aa934b92b869998d826463b630f560f96e4257391deebabc9a904`，A1-D `e94fefa22cd116f149f197544d90e5c9197dfa6f8ace9918d9717853a728ead8`。完整分层结论、失败边界、运行路径与复现命令见 `docs/experiments/13_MULTIVIEW_RELIABILITY_EXPERIMENT.md`。
