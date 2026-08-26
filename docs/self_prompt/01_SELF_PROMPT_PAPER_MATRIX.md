@@ -17,10 +17,10 @@
 | S09 | AutoPrompt-SAM3D / 3D 医学 | SAM2 三层 feature→prompt，confidence frame filter | frame/slice级 mask/point提示与传播状态 | S+D | P | N：序列 prompt，不是对象 set | target-aware invalid-window filter | **Y：confidence frame与target-aware filtering** | 经 SAM2 prompt/video接口 | 生成器与筛选器，SAM2 sequence propagation | **Y：跨切片传播与筛选** |
 | S10 | EviPrompt / 少样本医学 | reference mask 的正/负 feature prototypes；三增强证据融合 | 正点+负点，后续 box refinement | S | Y | N：多点同一 SAM 调用 | **Y：正/负证据** | **Y：evidential belief/uncertainty** | Y：点/box | SAM 冻结 | **Y：首轮 mask→box→再解码** |
 | S11 | AlignSAM / 开放上下文 | VLM attention + RL agent | 连续选择/修正点 prompt | S | Y | N：每任务 agent 顺序决策 | 背景动作/奖励，非显式 no-object class | critic/value 与 mask reward | Y：标准点 | SAM 冻结，训练 agent | **Y：SAM mask/probability 作状态反馈** |
-| S12 | PromptPilot / few-shot | DINOv2 reference匹配初始化；feature/physical agents+manager | 正/负点集合与 remove/restore 动作 | S | Y | N：点集合游戏 | 正/负点与删除/恢复；无已核验 no-object | **Y：SAM DSC、局部边际贡献、Q-value** | Y：标准点 | SAM/DINO冻结，agent学习 | **Y：逐动作调用/评价 SAM** |
+| S12 | PromptPilot / few-shot | 标注reference mask经DINOv2双向patch匹配初始化；feature/physical agents+manager | 正/负点集合与 activate/prune 动作 | S | Y | N：点集合 coalition | 正/负点与删除；无显式 no-object | **Y：SAM DSC、逐点LOO边际贡献、EMA、Q-value** | Y：标准点 | SAM/DINO冻结，三个DQN agent学习 | **Y：每步调用SAM并评价动作** |
 | S13 | H-SAM / 医学 | 默认空 prompt + 第一阶段预测 | stage-1 pre-mask/attention引导 stage-2 | D+Q | N | N：语义 mask，不是实例 set | class-balanced attention压背景；无 no-object | 无概率校准 | 默认 embeddings；不需要手工 prompt | **Y：两阶段 hierarchical decoder** | **Y：stage-1 mask→stage-2** |
 | S14 | Semantic AutoSAM / 医学 | 图像 feature→cross-attention prompt embedding | learned prompt embeddings | Q/feature | N | ? | ? | ? | 摘要称替换手工 prompt encoder | 轻量 cross-attention；细节待全文 | ? |
-| S15 | SAM-SPL / 单帧 IRSTD | 浅层高分辨率 feature→self-derived dense prompts | 多尺度 dense feature prompt | D/feature | N | N：整体 dense segmentation | 无显式 no-object/background prompt | 无已核验 UQ | 不走物理 point/box prompt encoder | shallow↔latent 双向 prompt block + mutual calibration decoder | N |
+| S15 | SAM-SPL / 单帧 IRSTD | `F0/F1/F2`按16/8/4倍下采样并拼接→`1×1 Conv` | `P∈R^(H/16×W/16×256)` dense prompt tokens + 1个learned output token | D+Q/feature | N | N：整体 dense segmentation | 无显式 no-object/background prompt | 无显式UQ/候选置信 | 不走物理 point/box prompt encoder | `P/O`与latent `Z`经two-way Transformer双向交互；MSIC skip decoder | N |
 | S16 | IR-SAM2 / 单帧 IRSTD | — | — | — | — | — | — | — | — | — | — |
 | S17 | TEP-SAM / 多帧 IRSTD | global-local temporal discrepancy→4 temporal query tokens | temporal prompt queries + enhanced feature | Q | N | N：帧/视频 query，不是对象 set | 显式建模背景运动均值但无 no-object class | temporal discrepancy/aux loss | 论文路径向 SAM token stream注入 | temporal prompt generator + adapter | 跨帧联合，不是 iterative click |
 | S18 | SAM-DAQ / RGB-D 视频显著目标 | RGB-D encoder→frame/video adaptive queries | frame queries + video queries + memory prompts | Q | N | N：显著对象级查询集合但非实例匹配 | depth抑制背景；无显式 no-object | query quality隐式；无校准 UQ | SAM2 memory/prompt统一路径 | query adapter + intermediate supervision | **Y：视频 memory/update** |
@@ -42,10 +42,10 @@
 | S09 | tumor masks/伪mask，frame confidence与window监督 | 完整 volume，多个 slice/SAM2传播 | 正文OA；未审计官方代码 | 中高：极小病灶+错误prompt过滤 | 中：confidence filtering已有先例 | 依赖3D连续性；不适用于独立单帧协议 |
 | S10 | 无训练；reference mask构造正负原型 | **需要一张标注 reference**，多次 SAM | 有代码；许可未声明 | 中：不确定性/正负 prompt | 中 | 非image-only；reference域差/原型错误会传递 |
 | S11 | task GT mask用于RL reward | 图像+任务文本，迭代多次 SAM | 论文全文；代码404 | 中：prompt credit/feedback | 中高 | 训练/推理成本高；依赖VLM/text；代码不可复核 |
-| S12 | 代码环境用 GT mask计算 DSC reward | reference mask/DINO特征；多步 SAM | 代码可读；许可未声明；PDF缺 | 中：marginal credit/harmful prompt | 高：prompt credit已有直接近邻 | 不是无参考单图；GT reward训练，推理流程与性能待论文核对 |
+| S12 | **目标图GT mask用于RL训练的DSC与LOO reward**；reference mask用于初始化 | 推理需要1张标注reference、已训练agent和多步SAM；不需要目标图GT/参数更新 | 全文+代码可读；许可未声明 | 中：marginal credit/harmful prompt | **高：SAM response与逐prompt credit已有直接近邻** | 不是无参考单图；200 episodes×100 steps，多次SAM/LOO代价高；无no-object |
 | S13 | stage1/stage2 mask deep supervision | 单图；无 prompt | MIT | 中：mask-response feedback | 中高：response adaptation不必来自点 | 无显式候选/no-object；医学语义分割偏大目标 |
 | S14 | mask GT（摘要可推断，细节待正文） | 单图；无人工 prompt | 无代码/全文 | 中 | 中 | 仅4页且证据不全；无法核对 shape/loss/失败案例 |
-| S15 | mask GT | 单图；无 GT prompt | 代码可读；许可未声明；PDF缺 | **直接** | **高：浅层纯视觉 self-prompt直接基线** | 无object query/no-object；论文细节与消融待补 |
+| S15 | BCE式三尺度mask supervision；浅层prompt与CGKA端到端学习；SAM2 Hiera-Tiny部分冻结 | 单图→最终`Y0`阈值0.5；无GT/文本/人工prompt | 全文+代码可读；许可未声明 | **直接** | **极高：浅层纯视觉dense self-prompt直接基线** | 无object query/no-object/候选级信用；300 epochs、双主干，跨域和实时性仍受限 |
 | S16 | — | — | 排除 | 直接但未纳入证据 | 不作结论 | 来源策略排除 |
 | S17 | multiframe mask + temporal aux loss | 短帧窗；无 GT prompt | 全文；本轮未审计代码 | 直接但协议不同 | 中：temporal query不可冒充单帧创新 | 依赖相干运动；快速场景变化和效率受限 |
 | S18 | video saliency masks、intermediate loss | RGB+depth+video memory | 全文；未审计代码 | 邻近：query/memory机制 | 中 | 多模态视频；无instance/no-object，不能直接用于单帧IR |
@@ -60,14 +60,14 @@ S 级重复项见上表；这里列独立的 A 级工作。`外部依赖`是部�
 | A02 | LDFSAM | 排除 | — | — | — | — | — | 不纳入 | MDPI策略排除 |
 | A03 | Self-Prompt SAM | auxiliary multi-scale masks→box+center | S+D | Y/N | N | coarse→prompt | mask / image-only | pre-mask比单点强 | 仍是单语义mask，非object set |
 | A04 | AutoPrompt MedSAM | diffusion class prompt→sparse+dense embeddings | S+D | N/N | uncertainty-aware objective | N | class+mask / class label | 结构化sparse+dense | 公开代码未连接 `diffusion_model`，不可直接复现 |
-| A05 | MUP-SAM | Mamba U-Net→refined boxes + fusion | S | Y/P | confidence | output fusion | mask / image-only | box候选+融合 | detector/aux网式方案，创新拥挤 |
+| A05 | MUP-SAM | MSVM-UNet mask→腐蚀/膨胀、box expansion、NMS→class boxes；另有mask融合 | S | Y/P：多box分别解码 | box分数；零box输出零mask，无learned no-object | **aux mask与MedSAM mask经learned pixel fusion** | 两阶段mask监督 / image-only | box prompt错误可由response fusion补救 | 本质是强aux segmentor→box→冻结MedSAM；不是轻量self-prompt，且融合贡献很大 |
 | A07 | PA-SAM | prompt adapter加强point/box与image细节 | S+D | Y/N | N | N | prompt GT / prompt required | 验证decoder sensitivity | 不是自动prompt源 |
-| A08 | DVPT | local feature prompt + global guidance | D/Q | N/N | N | N | mask / image-only | 局部+全局双prompt | feature prompting近邻，非candidate-level |
+| A08 | DVPT | CNN stem生成local dense prompt；SAM四层global-attention features提取GGP | D+Q | N/N | 无background/no-object/UQ | N | mask / image-only；500 epochs | 局部dense+全局learned token双prompt | **强碰撞image→global prompt feature**；绕开native prompt encoder、自定义CNN decoder，非candidate-level |
 | A09 | HSP-SAM | hierarchical abstract prompts | Q | N/N | P | hierarchical | mask / image-only | 摆脱物理坐标 | 与UN-SAM/H-SAM近，需object/no-object差异 |
 | A10 | SurgicalSAM | class prototypes→dense+sparse class tokens | S+D+Q | N/N | 正/负class embedding，无no-object | N | masks/prototypes / image+learned prototypes | paired prototype prompt | 医疗类别固定；不是实例候选 |
 | A17 | UR-SAM | augmented prompts + uncertainty rectification | S | Y/N | **UQ/rectification** | correction | mask+perturbed prompt / prompt | 错prompt鲁棒 | 需要初始prompt；不是image-only生成 |
 | A18 | FNPC-SAM | uncertainty定位false negative/positive→纠正点 | S | Y/N | **aleatoric UQ+正负纠错** | iterative | mask / initial prompt | harmful prompt correction | 医学交互式，非自动候选set |
-| A19 | AutoPromptSeg | decoupled uncertainty prompt generator | S/D | P/N | **UQ** | teacher/student | labeled+unlabeled / image-only | 可靠性可解耦 | 半监督医学域；需证明tiny calibration |
+| A19 | AutoPromptSeg | V-Net MC dropout→epistemic/aleatoric uncertainty；`PSS×class probability`→3D NMS Top-K | S | 3D坐标/N | **低不确定度可靠点；每类K=20** | V-Net/SAM-Med3D双分支一致性 | labeled+unlabeled / image-only；1200 epochs、多次MC | UQ必须进入选点且低风险点优于高风险点 | **可靠性采点已拥挤**；医学3D/半监督、MC开销大，摘要与Table 1有数字不一致 |
 | A20 | UncertainSAM | post-hoc aleatoric/epistemic/task UQ | — | — | **UQ** | N | 无需重训/已有SAM输出 | 可作可靠性评估器 | 不生成prompt，不解决候选污染 |
 | A23 | PPD | attack/defense agents增删正负点 | S | Y/N | harmful prompt score | **Y** | 代码训练环境用GT Dice / 多步SAM | 负点与prompt credit | GT reward/多步成本；论文入口待核验 |
 | A24 | PP-SAM | perturbed boxes/points训练 | S | Y/N | robustness | N | GT prompt扰动 / prompt | decoder对误差鲁棒 | 不解决无prompt部署 |
@@ -90,7 +90,7 @@ S 级重复项见上表；这里列独立的 A 级工作。`外部依赖`是部�
 | A47 | SPT | coarse anomaly draft→relation refinement | D/Q | N/N | background relation | two-stage | mask / image-only | draft+关系 | 非SAM核心prompt，近pre-mask范式 |
 | A48 | SACM | prompt-free dual-level adapters + dual-stage masks | D/Q | N/N | curvilinear background | two-stage | mask / image-only | prompt-free响应适配 | 结构域完全不同；不是object set |
 | A49 | OFL-SAM2 | online few-shot target feature learner→prompt-free SAM2 | Q/D | N/N | target/background P | online memory | support/online target / few-shot | 在线target state | 外部在线样本，部署协议不同 |
-| A50 | S4M | 4点结构与几何关系 | S+relation | Y/N | geometric consistency | N | point annotations / 4 points | 点应作为结构而非独立click | 仍需点输入，不解决自动候选 |
+| A50 | S4M | GT/人工 extreme 或 major/minor 四点 | S+relation | Y/N：单实例4点 | role-specific type embeddings；无no-object/UQ | 训练可加2轮error-region refinement；Canvas为训练only | GT mask模拟点+convex-hull Canvas / 测试仍需人工4点 | prompt应保留角色与几何关系 | **不是self-prompt部署**；但证明把所有点当同类型会产生表示冲突，限制TB/多点创新表述 |
 
 ## 4. 机制结论
 
@@ -98,3 +98,5 @@ S 级重复项见上表；这里列独立的 A 级工作。`外部依赖`是部�
 2. **真正与 PR #3 不同的最小单位是 candidate state，而不是更好的 heatmap。** 最有价值的共同结构是：每候选独立 query/mask、显式 background/no-object、candidate score在 decoder 内仍存在，以及用 mask response 反向检验 prompt。
 3. **原生 prompt encoder 是否被使用必须单独报告。** IP-SAM 的消融表明“连续前/背景状态经过冻结 prompt encoder”与简单 feature addition 不等价；RSPrompter/De-LightSAM又证明可以绕开坐标 prompt。实验必须直接测 prompt-to-mask sensitivity，不能只看 prompt recall。
 4. **单帧 IRSTD 的空白不是 TTA consistency。** SPARK-SAM 已把自动IR提示与response adaptation结合；SAM-SPL已覆盖浅层纯图像self-prompt；IP-SAM已覆盖前景/背景非对称提示。可发表空间要同时满足对象级隔离、拒绝/背景、decoder消费和tiny-target证据。
+5. **“可靠性选点”与“全局图像prompt”也不是空白。** AutoPromptSeg已系统比较低/高不确定度及random/center/grid点；DVPT已从多层全局图像特征生成learned prompt tokens。新方法必须证明可靠性/语义状态被decoder消费并产生可归因的mask变化。
+6. **结构化点的角色不能在decoder前丢失。** S4M的消融表明共享positive embedding会与极值点角色冲突；当前把全部候选塞进`[B,1,K,2]`不仅混对象，也混角色。即使不采用交互式4点，其role-aware结论仍支持candidate identity与target/background type分离。

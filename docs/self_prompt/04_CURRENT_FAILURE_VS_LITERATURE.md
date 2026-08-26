@@ -37,8 +37,8 @@ IRSTD-1k新validation（80张，seed 20260825，固定resize）中：
 | single-channel probe | 只表示targetness，不能表示对象identity、background、no-object、shape | MaskSAM/RSPrompter object queries；IP-SAM paired prompt；Sam2Rad box+mask+latent | 同容量`K` query+micro-mask vs 单通道heatmap |
 | five views | 只增加观测次数，不增加prompt语义/对象结构；延迟约4× | EviPrompt evidential belief；TEP-SAM temporal query（但协议不同） | 固定同计算预算的ensemble control；停止新增视图 |
 | inverse warp/cluster | cluster是几何后处理，不能学到candidate-to-mask因果贡献 | GPRN graph prompt、PromptPilot marginal credit | leave-one-candidate-out mask delta；若无信号，不训练graph/MLP |
-| support/dispersion gate | reliability只用于keep/rank；被选后身份消失 | SPARK-SAM token gate；IP-SAM background gate；MaskSAM class/no-object | reliability置零/随机/shuffle并测mask变化；若mask不变则decoder未消费 |
-| Top-K all-positive | false candidate不能作为negative evidence；多点可能被SAM解释为同一对象的多个click | EviPrompt正负点；IP-SAM前/背景state；Memory-SAM前/背景retrieval | target-only vs target+outer-ring background vs shuffled background |
+| support/dispersion gate | reliability只用于keep/rank；被选后身份消失 | SPARK-SAM token gate；IP-SAM background gate；MaskSAM class/no-object；AutoPromptSeg uncertainty Top-K | 与AutoPromptSeg式低不确定性外部排序对照，再做reliability置零/随机/shuffle；若mask不变则decoder未消费 |
+| Top-K all-positive | false candidate不能作为negative evidence；多点共享同一种正点角色，可能被SAM解释为同一对象的多个click | EviPrompt正负点；IP-SAM前/背景state；S4M role/type embeddings | target-only vs target+outer-ring background vs shuffled background；共享/专用/打乱角色embedding |
 | one SAM query | 多个目标、重复候选和错误候选共享attention与一个mask，无法归因/拒绝 | MaskSAM、RSPrompter一query一mask+`∅` | `[B,1,K,2]` vs `[B,K,1,2]`，并逐mask objectness/IoU加权 |
 | one mask | 只可全局阈值，不能在candidate级拒绝；错误点污染整张mask | per-query micro-mask + no-object aggregation | max、objectness weighted、reliability×SAM-IoU aggregation |
 
@@ -62,11 +62,11 @@ cluster只是一组坐标记录，进入SAM后没有candidate identity。没有q
 
 ### 4.5 是否缺 mask feedback？——是
 
-当前SAM mask只用于最终评价。AoP-SAM用mask overlap去冗余，AlignSAM/PromptPilot用response学习动作，H-SAM用stage-1 mask条件stage-2。最小改动不是先上RL，而是离线缓存每候选的独立mask与drop delta。
+当前SAM mask只用于最终评价。AoP-SAM用mask overlap去冗余，H-SAM用stage-1 mask条件stage-2；PromptPilot已经用多agent动作、SAM全局DSC和训练期GT leave-one-out边际贡献来优化点集。最小改动不是复刻RL/LOO，而是先离线缓存每候选独立mask，判断**无需GT的首轮response**是否真的比candidate score更能区分TP/FP。
 
 ### 4.6 是否缺 prompt credit？——是
 
-support/dispersion只能说“视图一致”，不能说“这个prompt改善了最终mask”。必须定义`credit_k = quality(M_all) - quality(M_without_k)`或训练期可计算的SAM response proxy，并检验它能否预测有害prompt。
+support/dispersion只能说“视图一致”，不能说“这个prompt改善了最终mask”。训练期可以定义`credit_k = quality(M_all) - quality(M_without_k)`作oracle诊断，但PromptPilot已直接使用GT-LOO credit；因此它不能再作为主要创新，只能检验无需GT的response proxy能否在单次部署预测有害prompt。
 
 ### 4.7 是否缺 decoder response adaptation？——高度可能
 
@@ -98,10 +98,16 @@ A3显著改变prompt-level指标而mask不跟随，是直接证据。SPARK-SAM�
 | Sam2Rad | P | P | box+mask+latent共同消费 | interim mask | 给出轻于Mask2Former的联合prompt state |
 | AoP-SAM | N | filter | N | **Y** | response可用于去重/筛点 |
 | RSPrompter | **Y** | **C+1** | query token | query mask attention | 证明latent query可绕开物理坐标 |
-| SAM-SPL | N | N | dense prompt在encoder/decoder保留 | N | 是必须打败的纯图像IRSTD基线 |
+| SAM-SPL | N | N | 浅层多尺度`P`经two-way transformer与SAM2 latent交互 | N | 图像-only、无物理prompt；IRSTD-1K full 74.09 IoU，是必须正面对照的纯图像IRSTD基线 |
 | EviPrompt | N | **正负证据** | standard point | **两轮** | 不确定性/背景比all-positive更合理 |
-| PromptPilot | N | 正负/删除 | action Q/credit | **多轮** | 有害prompt suppression已有强近邻 |
+| PromptPilot | N | 正负、activate/prune | Manager以SAM DSC和GT-LOO credit训练 | **多轮** | target推理无GT但需要一张标注reference；有害prompt suppression/credit已有直接近邻 |
+| AutoPromptSeg | N | class-wise low-uncertainty points | uncertainty仅用于NMS/Top-K后输入SAM | N | 低不确定性筛点已有强结果，但未证明reliability在decoder内持续生效 |
+| DVPT | N | learned global tokens | local dense prompt与global group tokens经cross-attention进入冻结SAM encoder | N | image→local/global visual prompt已覆盖，不能以global visual token本身作为贡献 |
+| S4M | N | 四点角色/type | role embedding直接区分top/bottom/left/right或major/minor | N | 证明同为正点也需要身份；但其推理仍依赖人工/GT模拟四点 |
+| MUP-SAM | P | box、zero-box fallback | 辅助分割→形态学box→MedSAM，再由fusion net融合 | N | image-only链路可部署，但大幅收益主要来自后端fusion，不能等同prompt机制收益 |
 | H-SAM | N | attention P | stage state | **两阶段** | decoder response adaptation可能优先于prompt head |
+
+新增全文使边界更明确：SAM-SPL已经覆盖“浅层feature生成dense self-prompt并纯图像部署”，DVPT覆盖“局部dense prompt+全局visual tokens”，AutoPromptSeg覆盖“不确定性选点”，S4M覆盖“点角色编码”，MUP-SAM覆盖“辅助分割器生成box再由fusion兜底”。剩余可检验空间不在于再生成一种token或再排一次Top-K，而在于candidate identity、no-object、角色/背景反事实以及**无需在线GT的单步response拒绝**。
 
 ## 6. 因果诊断顺序
 
@@ -120,7 +126,7 @@ Oracle spatial prompt sensitivity
 1. 相同坐标，`reliability=0/1/random/shuffled`；如果mask完全不变，说明现接口没消费可靠性。
 2. 相同K点，one-query vs K independent queries；如果oracle独立query也不优，停止object-set长训练。
 3. correct/zero/shuffled/wrong/background prompts；如果mask sensitivity近零，停止任何prompt distillation。
-4. independent mask的candidate drop；如果drop delta不能区分TP/FP，停止PromptPilot式credit head。
+4. independent mask的candidate drop只作训练期oracle；若无需GT的response proxy不能预测drop delta/TP-FP，停止任何PromptPilot式credit student。
 5. oracle center point、oracle tight box、oracle micro-mask；确定真正缺的是坐标、shape还是decoder response。
 
 ## 7. 结论

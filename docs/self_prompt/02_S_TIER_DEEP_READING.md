@@ -1,6 +1,6 @@
 # S 级 Self-Prompt 论文深读
 
-阅读口径：14 篇基于完整正文，S12/S15 基于摘要+作者代码，S14 基于摘要，S16按来源策略排除。对缺全文条目，未补写不存在的公式、消融或算力。张量 shape 以作者公开代码为准，详见 `03_REFERENCE_CODE_PATH_AUDIT.md`。
+阅读口径：16 篇基于完整正文；其中S12/S15由用户补齐正式PDF并与作者代码交叉核对，S14仍只基于摘要，S16按来源策略排除。对S14未补写不存在的公式、消融或算力。代码shape与论文公式并列核验，详见 `03_REFERENCE_CODE_PATH_AUDIT.md`。
 
 ## S01 SPARK-SAM
 
@@ -167,20 +167,20 @@
 11. **不应照搬**：VLM+PPO+多轮在线优化；成本和GT reward训练都过重。
 12. **复现依赖**：SAM、VLM、任务数据、RL环境；论文/补充已读，官方仓库404。
 
-## S12 PromptPilot（待 PDF 补齐）
+## S12 PromptPilot
 
-1. **研究问题**：few-shot条件下联合优化语义一致性、物理覆盖和每个点的边际贡献。
-2. **完整架构**：DINOv2特征匹配初始化点图；Feature Agent与Physical Agent提议remove/restore；Manager Agent仲裁；SAM反馈。
-3. **Prompt 张量/数据流**：代码state是点图、feature/position/statistics；action编码含操作、正负、坐标和权重；最终是标准正负点集合。
-4. **训练目标**：代码包含DQN/manager目标；环境用SAM预测与GT mask计算DSC/global reward及局部marginal contribution。论文精确公式待PDF。
-5. **推理**：README称DINOv2和SAM冻结、迭代优化点；是否仍需support mask及停止策略细节待正文。
-6. **关键消融**：待PDF，当前不得引用README以外的表格数字。
-7. **失败案例**：待PDF；代码层面动作空间随最大节点数增长，且没有显式no-object action。
-8. **计算开销**：多agent多step SAM评价，预计明显高于一次decoder；精确值待PDF。
-9. **与当前项目差异**：它显式计算点的边际mask贡献并允许删除有害点。
-10. **可迁移机制**：离线leave-one-out/候选drop作为credit label；训练轻量gate后单次推理。
-11. **不应照搬**：多agent RL整套系统和GT Dice在线环境；不符合当前低成本单图部署。
-12. **复现依赖**：DINOv2、SAM、few-shot reference、agent checkpoints；代码无根许可证，论文PDF待用户提供。
+1. **研究问题**：few-shot条件下，如何把语义一致性、物理覆盖、SAM最终mask质量和每个点的边际贡献放进同一自动prompt优化过程。
+2. **完整架构**：reference image/mask与target image都切为`14×14` non-overlapping patches；冻结DINOv2完成双向最近邻label propagation，初始化正/负target nodes。Feature Agent与Physical Agent分别在特征图和坐标图上提出`activate/prune`动作，Manager Agent从二者中选择动作并调用冻结SAM评价。
+3. **Prompt 张量/数据流**：状态为`(Vp,Vn,Mf,Mp)`；`Vp/Vn`是带正负标签的target patch centroid集合，最终作为标准SAM点提示。它是点集合coalition，不是每候选独立query，也没有DETR式`∅`。
+4. **训练目标**：Feature reward为正点内聚与正负分离，Physical reward为同类点分散与正负边界接近。Manager的全局reward为`β·DSC(V)+(1-β)·mean(w_i)`，其中`w_i`是`DSC(V)-DSC(V\{v_i})`的EMA。**目标图GT mask仅在agent训练中计算DSC/LOO reward**；DINOv2与SAM保持冻结。
+5. **推理**：需要一张标注reference image/mask、目标图和已训练agents；agents多步改变target正负点，冻结SAM产生最终mask。目标图GT不参与推理，且foundation model不做test-time parameter update，但这不是无参考单图协议。
+6. **关键消融**：四个医学数据集平均mIoU中，feature-only/physical-only/单agent joint分别为34.0/34.5/34.2；加入manager DSC后分别为52.2/53.0，双actor+manager为61.3；再加入LOO后为62.9，说明全局SAM反馈贡献最大，LOO在其上再增1.6pp。feature-matching与coarse-segmentation两种初始化下都优于单agent PPO。
+7. **失败与边界**：论文没有单列失败案例；明确边界包括reference mask依赖、动作空间随patch nodes增长、无显式no-object、prompt贡献依赖当前coalition，以及训练reward直接需要目标GT。跨域结果不能证明无reference IRSTD有效。
+8. **计算开销**：RTX 4090；训练`I=200` episodes、每episode `T=100` steps，且LOO需要对当前coalition逐点额外SAM评价。论文未给单图latency/FLOPs，因此不能把“冻结模型”误写成低成本。
+9. **与当前项目差异**：它让SAM最终response直接决定动作与逐点credit；当前A3的reliability只在decoder前筛选，被选中后身份和分数消失。
+10. **可迁移机制**：只迁移**离线**candidate-drop/first-response诊断，或者用不依赖GT的response proxy训练单步gate；把LOO视为oracle teacher而非部署路径。
+11. **不应照搬**：完整多agent DQN、support mask协议、目标GT Dice reward和多轮在线SAM调用；这些会改变当前单图image-only问题定义并显著增加成本。
+12. **复现依赖**：DINOv2、SAM、few-shot reference mask、三个agent checkpoints；论文与公开代码在GT reward、标准点接口和多步环境上吻合。代码无根许可证，只可审计/自行重写。
 
 ## S13 H-SAM
 
@@ -212,20 +212,20 @@
 11. **不应照搬**：在证据不完整前不能据此设计shape或宣称复现。
 12. **复现依赖**：正式4页PDF、任何supplement/作者代码；请用户补齐。
 
-## S15 SAM-SPL（待 PDF）
+## S15 SAM-SPL
 
-1. **研究问题**：在多红外平台上统一保持tiny detail与高层context，纯图像生成self-derived prompts。
-2. **完整架构**：SAM2 adaptor consult-guide encoder + shallow self-prompt generator双向交互 + mutual calibration skip decoder。
-3. **Prompt 张量/数据流**：代码中浅层dense features与SAM stage features相加进入`pmt_blocks`；输出`sam_backbone_embeds`与三层`dense_embeds`，不是物理点/框。
-4. **训练目标**：公开训练以IRSTD mask监督；论文精确loss与权重待PDF。
-5. **推理**：`testing.py`只把图像送入model；无GT point/box/mask。
-6. **关键消融**：待正式PDF；README结果不能替代论文表格/消融。
-7. **失败案例**：待PDF；代码没有显式candidate/no-object，因此多实例归因与空目标是可预见但尚未被论文证实的边界。
-8. **计算开销**：Tiny/Small/Large配置存在；精确参数/FLOPs待PDF。
-9. **与当前项目差异**：比PR #3更早在encoder多层融合浅层prompt，但没有独立candidate query。
-10. **可迁移机制**：作为强纯视觉baseline；浅层feature可供micro-mask query读取。
-11. **不应照搬**：仅抽取`pmt_generator`加到现有模型会是模块堆叠，且许可未声明。
-12. **复现依赖**：SAM2 checkpoints、四套IRSTD数据；代码可运行边界需实测，正式PDF请用户补齐。
+1. **研究问题**：在多种红外平台和目标类型上同时保留tiny detail与高层context，并把SAM的自然图像知识适配为纯图像IRSTD语义指导。
+2. **完整架构**：五层卷积residual encoder与冻结SAM2 Hiera-Tiny前三stage并行；Consult-Guide Knowledge Adaptation（CGKA）把卷积/SAM同尺度feature融合后生成下一SAM stage的semantic enquiry；Self-Prompt Learning（SPL）由浅层feature生成dense tokens并与深层latent双向交互；Mutual Semantic Inconsistency Calibration（MSIC）修正skip decoder，三尺度输出监督。
+3. **Prompt 张量/数据流**：`F0/F1/F2`分别按16/8/4倍下采样到`H/16×W/16`并拼接，`1×1 Conv`得到`P∈R^(H/16×W/16×256)`；再拼接learned output token `O∈R^256`。`T=[P,O]`与深层`Z`经self-attention和双向cross-attention迭代，输出token调制上采样后的`Z'`。这不是点/框，也不调用native physical prompt encoder。
+4. **训练目标**：三个decoder输出经sigmoid/上采样后做multiscale binary cross-entropy。Adan优化300 epochs，batch size 12，初始学习率0.01；论文和代码均表明GT只作为mask监督，不生成推理prompt。
+5. **推理**：单幅图像直接输出最终stage `Y0`，阈值0.5；无GT point/box/mask、无文本、无reference。它是真正image-only self-prompt，但输出仍是单个整体语义mask。
+6. **关键消融**：IRSTD-1K上baseline为65.82 IoU/79.38 F1/90.91 Pd/25.51 Fa，full SAM-SPL为74.09/85.11/92.59/9.28。去掉MSIC、SPL、CGKA时IoU分别为71.40、72.72、72.48。Prompt策略对比中，SPL在NUDT-SIRST/IRSTD-1K/IRSTDID-SKY的IoU为94.63/74.09/73.40，均优于RPR与PGM。Consult-guide策略也明显优于直接SAM feature或单向融合。
+7. **失败与边界**：论文承认distribution shift、外部扰动和资源约束下的实时性问题。结构上没有candidate query、background/no-object或prompt credit，因此无法把某个false candidate与最终mask错误一一归因；这是基于结构的边界，不是论文报告的失败统计。
+8. **计算开销**：RTX 4090训练300 epochs；主参数分析中5层配置为12.25M（不应与所有冻结SAM参数混为一谈）。论文给出参数/FLOPs散点但没有逐图latency表；双主干和多stage交互仍需作为效率baseline实测。
+9. **与当前项目差异**：SAM-SPL已先于PR #3完成浅层多尺度dense prompt、双向prompt-latent交互和纯视觉IR部署；PR #3仅凭换特征层或增加dense token不能形成新颖性。
+10. **可迁移机制**：把它作为直接强baseline；可借其`F0/F1/F2→micro-mask/query state`作为输入，但新增命题必须是candidate identity、`∅`、background和response-conditioned rejection。
+11. **不应照搬**：直接抽取`pmt_generator`、two-way block或MSIC堆到现模型；这既高度撞车，也受未声明代码许可证限制。
+12. **复现依赖**：SAM2 Hiera-Tiny checkpoint、四套IRSTD数据、论文300-epoch设置；论文图3/公式(4)–(9)与公开代码`pmt_generator.py`、`image_encoder.py`、`mask_decoder.py`的数据流一致。
 
 ## S16 IR-SAM2（策略排除）
 

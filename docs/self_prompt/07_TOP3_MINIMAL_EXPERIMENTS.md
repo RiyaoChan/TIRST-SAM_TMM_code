@@ -18,6 +18,7 @@ Top-3：
 - deterministic resize；seed固定并记录，筛选至少3 seeds后才能称稳定。
 - backbone、image encoder checkpoint、输入分辨率、segmentation threshold搜索范围一致。
 - 同参数量/同decoder-call控制：多query的共享image embedding不能重复算encoder；额外adapter容量给baseline一个同参数无prompt MLP/FPN控制。
+- 强机制控制：SAM-SPL式shallow dense visual prompt、DVPT式global visual token、AutoPromptSeg式低不确定性外部排序分别作为“视觉prompt/UQ筛点”对照；不能把重型MUP-SAM fusion的收益混入prompt贡献。
 - 面积分桶：1–9、10–16、17–25、>25 pixels。
 
 ### 必报 mask 指标
@@ -45,6 +46,7 @@ Top-3：
 | candidate drop | 逐个移除query | 测边际credit/harmful prompt |
 | reliability zero/random | 保持坐标，改权重 | 测可靠性是否进入decoder |
 | one vs multi query | `[B,1,K,2]` vs `[B,K,1,2]` | 测候选污染 |
+| shared/specific/shuffled role | 共享point type、target/background专用type、随机交换type | 按S4M证据检验角色身份是否被消费 |
 
 ### 通用停止线
 
@@ -145,8 +147,9 @@ ring半径按candidate局部尺度固定，不按test GT调；oracle行可用GT�
 3. `PromptSpacePair`：inner/outer连续mask或latent states分别经过冻结prompt encoder；
 4. `PromptSpacePair+AsymGate`：background state只作非对称抑制；
 5. `ShuffledBG/WrongBG/ZeroBG`。
+6. `SharedRole/SpecificRole/ShuffledRole`：target/background共用type、使用专用type、只打乱type而不改位置。
 
-这一组直接对应IP-SAM的关键边界。若`PromptSpacePair`不优于同参数`FeatureConcat`，不能主张prompt-space机制。
+这一组直接对应IP-SAM与S4M的关键边界。若`PromptSpacePair`不优于同参数`FeatureConcat`，或`SpecificRole≈ShuffledRole`，不能主张prompt-space/角色机制。
 
 ### T2：candidate-level paired query（仅T0/T1通过后）
 
@@ -181,9 +184,9 @@ loss与压力测试：
 - mask feature与candidate query的attention/response token（若接口可得）；
 - candidate score与view reliability作为基线。
 
-用GT component只在analysis阶段给每candidate标TP/FP；训练/测试严格按split。比较单变量、logistic regression和同参数MLP的candidate AUPRC/ECE。
+用GT component只在analysis阶段给每candidate标TP/FP；训练/测试严格按split。比较单变量、logistic regression和同参数MLP的candidate AUPRC/ECE，并加入AutoPromptSeg式低不确定性PSS/NMS/Top-K与原candidate score作为外部排序强基线。
 
-**通过线**：response-only或response+candidate相对candidate-score baseline AUPRC提升≥3pp，且validation选择的reject threshold在第二数据集使Fa降≥10%、Pd下降≤0.5pp。
+**通过线**：response-only或response+candidate相对candidate-score和UQ-ranking两种强baseline的AUPRC均提升≥3pp，且validation选择的reject threshold在第二数据集使Fa降≥10%、Pd下降≤0.5pp。
 
 **停止线**：SAM-IoU/response与TP/FP无关，或oracle response reject也不改善最终mask。
 
@@ -195,11 +198,13 @@ loss与压力测试：
 credit_k = Q(mask_all) - Q(mask_without_k)
 ```
 
-`Q`只在训练/analysis用GT定义，可分别采用IoU、Pd–λFa或component F1。另记录无需GT的proxy（SAM-IoU、mask overlap、center agreement）。检验proxy能否预测`credit_k<0`。
+`Q`只在训练/analysis用GT定义，可分别采用IoU、Pd–λFa或component F1。该GT-LOO只作为PromptPilot式oracle诊断，不能成为部署输入或“首次credit”主张；另记录无需GT的proxy（SAM-IoU、mask overlap、center agreement），检验其能否预测`credit_k<0`。
 
 必须含：TP点、FP点、duplicate点、同图多target点、全背景图。若leave-one-out credit严重非加性，报告pair-drop而不是强行拟合scalar。
 
 ### R2：单次 Refine–Reject adapter（仅R0/R1通过后）
+
+本阶段明确禁止复刻PromptPilot：不使用标注reference、不做多agent/RL、不在推理访问GT，也不把GT-LOO credit当输入。部署只消费当前图像、candidate和首轮冻结SAM response。
 
 第一轮低分辨mask response编码为`r_k`，更新：
 
@@ -220,7 +225,7 @@ action_k ∈ {accept, refine, reject}
 | R2-3 | Y | Y | accept/refine/reject | selective |
 | R2-shuf | shuffled response | Y | 同R2-3 | selective |
 
-**成功线**：R2-2必须优于R2-0，R2-shuf必须退化；R2-3在Fa/Pd不劣时，相对R2-2的额外延迟需有显著mask收益。若R2-1≈R2-shuf，response未被消费。
+**成功线**：R2-2必须优于R2-0及UQ-ranking控制，R2-shuf必须退化；R2-3在Fa/Pd不劣时，相对R2-2的额外延迟需有显著mask收益。若R2-1≈R2-shuf或不优于candidate/UQ ranking，response未提供独立信号，立即停止。
 
 ### 资源预算
 

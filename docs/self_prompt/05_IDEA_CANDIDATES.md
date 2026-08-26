@@ -23,9 +23,9 @@ component级Hungarian：object/no-object CE + micro-mask Dice/BCE + final mask D
 ### 与当前 PR #3 的实质差异
 候选身份一直保留到独立mask和拒绝，不再是`[B,1,K,2]→one mask`。
 ### 最接近论文
-MaskSAM、RSPrompter、Sam2Rad。
+MaskSAM、RSPrompter、Sam2Rad、SAM-SPL、DVPT。
 ### 新颖性冲突
-高：object query/no-object已成熟；独立命题必须收窄为“极小连通域的micro-mask state + SAM response校准 + 低K共享解码”，不能宣称首次auto-query SAM。
+高：object query/no-object已成熟，SAM-SPL与DVPT又分别覆盖浅层dense self-prompt和局部/全局视觉prompt；独立命题必须收窄为“极小连通域的candidate identity + micro-mask state + `∅`”，不能宣称首次auto-query或image-derived prompt SAM。
 ### 预期改善指标
 duplicate prompts/component、False Prompts/MP、Fa、tiny Pd、no-object accuracy。
 ### 最大风险
@@ -58,9 +58,9 @@ target/background contrastive margin、object CE、mask loss、wrong/shuffled ba
 ### 与当前 PR #3 的实质差异
 不是“再加负点”，而是每候选有可区分的target/background条件直至decoder。
 ### 最接近论文
-IP-SAM、EviPrompt、Memory-SAM、SurgicalSAM。
+IP-SAM、EviPrompt、Memory-SAM、SurgicalSAM、S4M。
 ### 新颖性冲突
-高：前/背景prompt已被IP-SAM直接覆盖；独立命题必须是candidate-level tiny-target paired state、outer-ring错误压力测试和one-query-per-component。
+高：前/背景prompt已被IP-SAM直接覆盖，S4M还证明不同正点角色需要专用type embedding；独立命题必须是candidate-level tiny-target paired state、角色保持与outer-ring错误压力测试，不能只是给正负token换名字。
 ### 预期改善指标
 Fa、False Prompts/MP、candidate AUPRC、background rejection、risk–coverage。
 ### 最大风险
@@ -95,7 +95,7 @@ reliability由SAM实际response验证，并可在decoder后拒绝；当前只在
 ### 最接近论文
 SPARK-SAM、AoP-SAM、AlignSAM、PromptPilot、ReSAM、H-SAM。
 ### 新颖性冲突
-高：response adaptation/iterative refinement非常拥挤。最小独立命题是“candidate-level single-step refine/reject under tiny-target Fa risk”，不得宣称首次mask feedback。
+**很高**：PromptPilot全文已经直接覆盖多agent activate/prune、SAM DSC与训练期GT-LOO credit，SPARK-SAM覆盖IR response adaptation。最小独立命题只能是“无reference、无在线GT、非RL、candidate-level single-step refine/reject under tiny-target Fa risk”，不得宣称首次mask feedback或prompt credit。
 ### 预期改善指标
 prompt-to-mask sensitivity、harmful prompt AUROC、Fa、no-object accuracy、latency-risk curve。
 ### 最大风险
@@ -130,7 +130,7 @@ support/dispersion从启发式过滤变为可校准三态分布，并一直参�
 ### 最接近论文
 EviPrompt、UR-SAM、AutoPromptSeg、UncertainSAM。
 ### 新颖性冲突
-中高：UQ本身不新；须证明candidate object-query与mask risk的联合校准。
+高：AutoPromptSeg已经完整覆盖MC-dropout epistemic/aleatoric uncertainty、低不确定性NMS与class-wise Top-K，并显著优于随机/中心/grid采点。须证明三态evidence在decoder/独立mask内被消费并优于AutoPromptSeg式外部UQ排序、temperature和isotonic；否则只是换一种筛点分数。
 ### 预期改善指标
 ECE/Brier、risk–coverage、no-object accuracy、Fa。
 ### 最大风险
@@ -165,7 +165,7 @@ credit ranking/regression、mask loss、calibration、sparsity/预算。
 ### 最接近论文
 PromptPilot、AlignSAM、PPD、AoP-SAM。
 ### 新颖性冲突
-高：prompt credit已有近邻；差异只能是离线teacher→单步tiny-target defender。
+**很高**：PromptPilot已用GT-LOO prompt marginal contribution训练Manager，prompt credit不再是开放命题。该方向降级为离线诊断；只有无需GT的单次student能在第二数据集保留收益时，才可作为RQ-Adapt的辅助监督，不能独立成为贡献。
 ### 预期改善指标
 harmful prompt AUROC、False Prompts/MP、Fa、平均prompt数。
 ### 最大风险
@@ -359,7 +359,7 @@ prompt-to-mask sensitivity、shuffled gap、IoU/Fa。
 ### Prompt 表示
 候选query不变；teacher只输出per-candidate target/background/uncertainty软标签。
 ### Prompt 生成
-图像候选先产生；GPT/CLIP角色token与candidate ROI做匹配，不直接投成全局sparse token。
+图像候选先产生；GPT/CLIP角色token与candidate ROI做匹配，不直接投成全局sparse token。DVPT已经覆盖image feature→global group tokens，因此“视觉编码器拟合一个全局文本向量”不构成独立机制。
 ### 一候选/一 query 设计
 依附Idea1/2，每候选独立。
 ### no-object / background / abstention
@@ -430,11 +430,11 @@ hard low-SNR Pd、Fa、query persistence、出现/消失准确率。
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | MicroQuery-SAM | 5 | 5 | 5 | 5 | 5 | 3 | 4 | 4 | **88** | Top-3；先oracle shape test |
 | 2 | TB-Prompt | 5 | 5 | 5 | 4 | 5 | 3 | 4 | 4 | **86** | Top-3；先background反事实 |
-| 3 | RQ-Adapt | 5 | 5 | 5 | 4 | 5 | 2 | 4 | 3 | **82** | Top-3；先离线response AUPRC |
-| 4 | EviSet | 5 | 5 | 4 | 4 | 5 | 3 | 4 | 4 | 82 | 若Top-3需要校准再并入 |
+| 3 | RQ-Adapt | 5 | 5 | 5 | 4 | 5 | 2 | 4 | 3 | **82** | Top-3仅保留窄诊断；PromptPilot全文使主张风险很高 |
+| 4 | EviSet | 5 | 5 | 4 | 4 | 5 | 3 | 4 | 4 | 82 | AutoPromptSeg式UQ排序必须作为强控制 |
 | 5 | Prompt Jacobian | 5 | 4 | 5 | 4 | 4 | 3 | 3 | 3 | 79 | response adapter辅助 |
 | 6 | Budgeted Abstention | 4 | 5 | 4 | 4 | 5 | 3 | 4 | 5 | 79 | 需empty样本 |
-| 7 | CreditDrop | 4 | 5 | 5 | 3 | 4 | 2 | 4 | 3 | 75 | 先做exact drop diagnostic |
+| 7 | CreditDrop | 4 | 5 | 5 | 3 | 4 | 2 | 4 | 3 | 75 | 降级为exact drop oracle diagnostic，不作独立贡献 |
 | 8 | Residual Micro-Mask Bank | 5 | 4 | 5 | 4 | 4 | 2 | 3 | 3 | 74 | 可并入Idea1 |
 | 9 | ContextGraph Query | 5 | 4 | 5 | 5 | 5 | 1 | 3 | 3 | 74 | graph新颖性风险高 |
 | 10 | RepelSet | 5 | 4 | 4 | 5 | 5 | 1 | 4 | 4 | 74 | 只作Idea1消融 |
@@ -444,5 +444,5 @@ hard low-SNR Pd、Fa、query persistence、出现/消失准确率。
 ## 自动淘汰检查
 
 - 12个候选均显式包含background/no-object/uncertainty之一，并设计decoder消费路径。
-- Idea 9明确降级为Idea1消融；Idea 12因协议不同不进入当前单帧Top-3；Idea 11因`C≈S≈W≈O`只保留为条件分支。
+- Idea 9明确降级为Idea1消融；Idea 12因协议不同不进入当前单帧Top-3；Idea 11因`C≈S≈W≈O`且DVPT已覆盖global visual tokens，只保留为candidate级条件分支。
 - 不提出：新显著性算子、新NMS/Top-K、增加视图、support MLP、all-positive one-query、reliability只排序、global text token直投、GT修prompt、detector-box→SAM主创新。

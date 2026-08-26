@@ -302,12 +302,13 @@ A2 相对 A1-P 将 global IoU 提高 0.49pp、Fa 降低 23.81%，但 Pd 下降 1
 
 - `docs/self_prompt/00_SOURCE_VERIFICATION.md`：任务书68个编号、53篇独立工作的身份/全文/代码/许可证核验；
 - `docs/self_prompt/01_SELF_PROMPT_PAPER_MATRIX.md`：prompt表示、no-object/background、decoder消费和部署依赖矩阵；
-- `docs/self_prompt/02_S_TIER_DEEP_READING.md`：18个S级条目，其中14篇基于全文；
+- `docs/self_prompt/02_S_TIER_DEEP_READING.md`：18个S级条目，其中16篇基于全文；
 - `docs/self_prompt/03_REFERENCE_CODE_PATH_AUDIT.md`：15个指定仓库中14个完成真实forward/loss/inference审计；
 - `docs/self_prompt/04_CURRENT_FAILURE_VS_LITERATURE.md`：PR #3逐环节失败诊断；
 - `docs/self_prompt/05_IDEA_CANDIDATES.md`：12个可证伪候选；
 - `docs/self_prompt/06_NOVELTY_COLLISION_AUDIT.md`：与SPARK-SAM、IP-SAM、SAM-SPL、MaskSAM等的冲突边界；
 - `docs/self_prompt/07_TOP3_MINIMAL_EXPERIMENTS.md`：只读/oracle优先的低成本预注册计划；
+- `docs/self_prompt/08_LOCAL_PDF_SUPPLEMENT.md`：用户补充的6篇全文逐项机制、数字与路线影响；
 - `references/self_prompt_related.bib`：已核验的非排除来源BibTeX。
 
 ### 10.1 文献导出的主结论
@@ -315,7 +316,7 @@ A2 相对 A1-P 将 global IoU 提高 0.49pp、Fa 降低 23.81%，但 Pd 下降 1
 1. 当前A3的核心失败不是prompt-level候选还不够准，而是候选进入SAM后丢失身份、background、no-object和reliability；`[B,1,K,2]`把多目标/错误点混入一个query。
 2. “图像生成prompt”“浅层高分辨率self-prompt”“前/背景prompt”“response adaptation”“one-query-one-mask/no-object”均已有直接先例；不能把其中任何单项写成首次。
 3. 下一步必须先证明decoder消费prompt：correct/zero/shuffled/wrong、reliability置零/随机、one-query vs multi-query、candidate drop和oracle micro-mask是必做反事实。
-4. SAM-SPL是纯视觉IRSTD self-prompt直接基线；SPARK-SAM是IRSTD prompt–response adaptation直接近邻；IP-SAM是前/背景prompt-space直接近邻；MaskSAM/RSPrompter是object-set/no-object直接近邻。
+4. SAM-SPL是纯视觉IRSTD self-prompt直接基线；SPARK-SAM是IRSTD prompt–response adaptation直接近邻；IP-SAM是前/背景prompt-space直接近邻；MaskSAM/RSPrompter是object-set/no-object直接近邻。补充全文进一步确认DVPT已覆盖local/global visual prompt、AutoPromptSeg已覆盖低不确定性自动筛点、S4M已覆盖点角色embedding、PromptPilot已覆盖多轮response与GT-LOO credit。
 5. 继续更换显著性算子、调Top-K/NMS、增加deterministic views或训练support/dispersion MLP均停止作为主创新。
 
 ### 10.2 Top-3待证伪方向
@@ -324,7 +325,7 @@ A2 相对 A1-P 将 global IoU 提高 0.49pp、Fa 降低 23.81%，但 Pd 下降 1
 |---:|---|---|---|
 | 1 | MicroQuery-SAM | 每候选独立query+micro-mask+`∅`，以objectness×reliability×SAM-IoU聚合 | oracle independent-query也不优于one-query |
 | 2 | TB-Prompt | 每候选保持target/background成对状态直到decoder，并做wrong/shuffled background反事实 | correct background不优于shuffled或持续过抑制tiny目标 |
-| 3 | RQ-Adapt | 用首轮独立mask response预测accept/refine/reject，而不是继续调candidate score | response AUPRC不优于原candidate score，oracle reject也不能降Fa |
+| 3 | RQ-Adapt | 无reference、无在线GT、非RL地用首轮独立mask response预测accept/refine/reject | response AUPRC不优于candidate score/AutoPromptSeg式UQ排序，或oracle reject不能降Fa |
 
 ### 10.3 执行闸门
 
@@ -332,9 +333,23 @@ A2 相对 A1-P 将 global IoU 提高 0.49pp、Fa 降低 23.81%，但 Pd 下降 1
 
 ### 10.4 待用户补齐材料
 
-- PromptPilot论文PDF与supplementary（OpenReview被验证页拦截）；
 - Semantic AutoSAM正式4页PDF；
-- SAM-SPL正式TGRS PDF与supplementary；
+- SAM-RSIS正式PDF或supplementary；
 - AlignSAM源码压缩包或新的官方仓库链接（指定GitHub链接404）。
 
 IR-SAM2、PMG-SAM、LDFSAM属于本轮来源策略排除的MDPI工作，没有进入证据、引用和新颖性评分；如需比较，应单独建立用户指定附录。
+
+### 10.5 用户补充全文回填（2026-08-26）
+
+已完整核读`paper/`下PromptPilot、SAM-SPL、AutoPromptSeg、MUP-SAM、S4M和DVPT六篇全文；S级18项中全文覆盖由14项提高到16项。PDF仅作本地证据源，不提交仓库，也不在版本库文档写入用户绝对路径。
+
+新增证据对实验路线的实际影响：
+
+1. SAM-SPL已完成图像-only浅层dense self-prompt，并在IRSTD-1K报告74.09 IoU；仅做shallow feature→dense token不再具有新颖性，且必须成为纯视觉直接基线。
+2. DVPT已覆盖冻结SAM中的local dense prompt与global group tokens；“让CLIP图像编码器生成一个全局文本/视觉特征”不能单独成为贡献，语义分支若继续只能落到candidate/字段级因果验证。
+3. AutoPromptSeg已覆盖epistemic/aleatoric uncertainty、低不确定性NMS与Top-K自动点；EviSet或reliability若只在decoder外排序，属于高碰撞，实验必须加入UQ-ranking强控制并证明状态进入独立mask。
+4. S4M证明结构化正点的role/type embedding会显著影响结果；TB-Prompt增加shared/specific/shuffled role控制，但S4M仍是人工交互方法，不能解决新图像无prompt问题。
+5. PromptPilot已用SAM DSC与训练期GT leave-one-out边际贡献训练多agent prompt优化；CreditDrop降级为oracle诊断，RQ-Adapt只保留“无reference、无在线GT、非RL、单次refine/reject”的窄路线，并必须优于candidate score和UQ ranking。
+6. MUP-SAM的辅助分割→box→MedSAM链路可image-only部署，但其大幅增益主要由后端fusion带来；后续对比必须隔离prompt质量与额外分割/fusion容量。
+
+本次仍未新增训练、性能结果或核心模型代码。下一步先执行M0/M1、T0、R0/R1零训练诊断；全文回填没有改变“机制过闸门后才做20/100 epoch训练、当前不做1000 epoch”的结论。

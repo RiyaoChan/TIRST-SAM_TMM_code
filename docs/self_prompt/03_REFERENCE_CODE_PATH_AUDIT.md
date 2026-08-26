@@ -101,12 +101,13 @@
 ## 9. PromptPilot
 
 - **构建/入口**：`feature_matching/generate_points.py`生成DINOv2初始点；`agents/node_env.py`为点图环境；`agents/node_agent.py`、`manager_agent.py`、`scheduler.py`；`train_game.py`与`arg_game_multi.py`。
-- **forward与shape**：NodeAgent的动作空间`max_nodes*4`，操作为remove/restore positive/negative；候选action encoding包含`[is_restore,is_neg,x,y,weight]`。状态是图/统计flatten后的向量，不是SAM latent query。
+- **forward与shape**：NodeAgent的动作空间`max_nodes*4`，代码把论文的activate/prune实现为remove/restore positive/negative；候选action encoding包含`[is_restore,is_neg,x,y,weight]`。状态是图/统计flatten后的向量，不是SAM latent query。
 - **Prompt encoder/decoder**：环境把当前正负点交给标准SAM；DINOv2/SAM按README冻结。
-- **loss/GT boundary**：DQN/manager学习Q-value；环境用GT mask计算SAM DSC/global reward与局部边际贡献。论文精确reward/训练协议待PDF。
+- **loss/GT boundary**：DQN/manager学习Q-value；环境用目标图GT mask计算SAM DSC与逐点LOO。论文式(19)为`β·DSC+(1-β)·mean(EMA-LOO)`，训练设置为200 episodes×100 steps；推理只需reference mask和已训练agent，不看目标图GT。
 - **checkpoint**：DINOv2、SAM、各agent checkpoints；多agent权重必须成套。
-- **敏感性证据**：代码天然做remove/restore与marginal credit；是否有正式oracle/shuffle表待PDF。
-- **复用结论**：无许可证。适合把leave-one-out credit离线化，不适合直接复用RL系统。
+- **论文—代码一致性**：双向DINO匹配、feature/physical双图、两个actor、manager、标准正负点和GT DSC/LOO reward一致；论文用activate/prune术语，代码用restore/remove术语。
+- **敏感性证据**：论文Table 3中双actor+manager为61.3平均mIoU，加入LOO为62.9；全局SAM反馈贡献远大于LOO的额外1.6pp。没有`no-object`或单步部署实现。
+- **复用结论**：无许可证。适合把leave-one-out仅离线化为诊断/oracle teacher，不适合直接复用RL系统或把GT reward带到部署。
 
 ## 10. H-SAM
 
@@ -121,12 +122,13 @@
 ## 11. SAM-SPL
 
 - **构建/入口**：`sam_spl/base_model.py`的模型forward；`sam_spl/image_encoder.py`；`sam_spl/pmt_generator.py`；`sam_spl/mask_decoder.py`；`testing.py`。
-- **forward与shape**：`image_encoder.forward`先得到主干浅层`out_feats`和SAM stages；stage boundary处`pmt_blocks[i](sam_out + shallow_out)`生成dense prompt并反加到后续SAM block。返回`sam_backbone_embeds`和前三层`dense_embeds`。
-- **Prompt encoder/decoder**：不是point/box/mask prompt，不调用native prompt encoder；prompt是feature-space状态，decoder用skip mutual calibration。
-- **loss/GT boundary**：训练脚本用mask GT；`testing.py`只传图像，无GT点框mask。
+- **forward与shape**：`image_encoder.forward`先得到五层卷积`out_feats`和SAM stages；CGKA在stage boundary用融合feature生成下一SAM enquiry。SPL把前三层feature按16/8/4倍下采样后拼接，`1×1 Conv`生成`P[H/16,W/16,256]`，再拼一个output token，与深层latent经two-way Transformer双向cross-attention。返回`sam_backbone_embeds`和前三层`dense_embeds`。
+- **Prompt encoder/decoder**：不是point/box/mask prompt，不调用native prompt encoder；prompt是dense feature token状态，decoder用MSIC skip calibration恢复分辨率。
+- **loss/GT boundary**：训练为三尺度binary mask supervision；论文设置Adan、300 epochs、batch 12、lr 0.01。`testing.py`只传图像，最终stage阈值0.5，无GT点框mask。
 - **checkpoint**：SAM2 Hiera checkpoints与SPL-T/S/L config/checkpoint。
-- **敏感性证据**：正式论文PDF缺失，不能核验prompt block消融与论文表；代码无counterfactual/shuffle测试。
-- **复用结论**：无根许可证；只能作为强baseline/重写，不可拷贝。
+- **论文—代码一致性**：论文公式(4)–(9)的浅层拼接、256维prompt、output token和双向交互与`pmt_generator.py`数据流一致；Fig. 3的CGKA/SPL/MSIC与三个代码模块边界一致。
+- **敏感性证据**：IRSTD-1K baseline/full为65.82/74.09 IoU；去MSIC/SPL/CGKA为71.40/72.72/72.48。论文只做模块/策略消融，没有correct/zero/shuffled prompt、candidate drop或no-object反事实。
+- **复用结论**：无根许可证；只能作为强baseline并自行重写。直接复制dense prompt/two-way block既有许可证问题，也不构成方法新颖性。
 
 ## 12. AutoPromptMedSAM
 
