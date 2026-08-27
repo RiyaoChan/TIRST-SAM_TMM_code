@@ -379,3 +379,22 @@ M2-2 将 Fa 降低 51.78%、CTR 保持不变，并改善 IoU，但 TCR 下降 4.
 - `docs/experiments/15_MICROQUERY_M0_M1_DIAGNOSTIC.md`；
 - `docs/experiments/16_MICROQUERY_M2_RESULTS.md`；
 - `docs/experiments/17_MICROQUERY_M3_FINAL_VALIDATION.md`。
+
+## 十二、MicroQuery-SAM 端到端 100-epoch 完整训练
+
+2026-08-27 已按 `experiments_guide/TIRST_SAM_MICROQUERY_END2END_FULL_TRAINING_PLAN_FOR_CODEX.md` 完成 IRSTD-1k 核心阶段。C0/C1/F1/F2 均使用 720 train / 80 validation、seed 20260825、K=10、100 epochs、每轮 validation；A1-P ImageEncoderViTHQ 始终 `eval+no_grad`，PromptEncoderHQ 与 MaskDecoderHQ 在四组均训练。C1/F1/F2 的 183,433 参数 MicroQuery head 使用同一初始化 SHA；optional modules 与 text embedding 全部关闭。test 未读取。
+
+主 checkpoint 按固定 threshold=0.5 global IoU 选择，随后只在 validation 扫描 `0.05–0.95`。正式 selected-threshold 结果如下，`Fa` 单位为 `×10^-6`：
+
+| Run | Best epoch | 阈值 | global IoU | nIoU | F1 | Pd | Fa | mask AUPRC | CTR | 延迟 ms/image |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| C0 one-query | 2 | 0.75 | 57.07 | 47.71 | 59.28 | 82.05 | 27.08 | 63.51 | 84.82 | 22.29 |
+| C1 independent matched | 18 | 0.40 | 57.75 | **53.28** | **65.60** | **90.60** | 34.71 | 62.60 | **94.64** | 40.02 |
+| F1 soft gate | 16 | 0.15 | **58.62** | 51.72 | 64.13 | **90.60** | 32.42 | **66.28** | **94.64** | 39.91 |
+| F2 gate+token | 1 | 0.40 | 56.74 | 48.49 | 61.18 | 86.32 | 39.10 | 64.48 | 89.29 | 40.07 |
+
+C1 相对 C0 将 nIoU/CTR 分别提高 5.56/9.82pp，证明 independent-query 与逐 query 监督有效，但 Fa 增加 7.63。F1 相对 matched C1 的 global IoU +0.87pp、Fa −2.29（−6.59%）、Pd 持平，但 nIoU/F1 分别 −1.56/−1.47pp；逐图 F1 差值的 bootstrap 95% CI 为 `[−2.96,−0.13]pp`，而 global-IoU CI `[−2.02,+5.43]pp` 跨 0。F2 相对 F1 的 IoU/nIoU/Pd 均下降，best checkpoint 退回 epoch 1。
+
+反事实审计将原计划中模糊的“明显优于”保守操作化为：correct 相对每个必需 intervention 的 global IoU、mean nIoU、mask AUPRC 均须更高，且至少一项提高 0.5pp。F1 correct 相对 all-one 的 mask AUPRC +3.44pp，且 batch/candidate shuffled 与 inverted 明显退化，因此 gate meaningful-effect 通过。F2 correct 相对 zero、batch-shuffled、candidate-shuffled 的最大增益仅 0.038/0.016/0.022pp，虽然 token LayerNorm/token-scale 梯度非零，token meaningful-effect 仍失败。
+
+按计划三级规则，本轮为 **Useful Partial Success（类型 A）**，winner 为 F1：soft gate 被最终 mask 消费并带来有限的 global-IoU/Fa 权衡改善，但证据混合、单种子且部分 CI 不支持稳定增益，不能称论文主模型。F2 candidate token 被拒绝。未进入 test、三随机种子或 NUDT；Partial 规则仅允许后续补一个 IRSTD seed 与一个 NUAA 单种子确认。完整配置、固定阈值表、2,000 次 paired bootstrap、反事实、效率和证据边界见 `docs/experiments/19_MICROQUERY_END2END_FULL_TRAINING.md`。
