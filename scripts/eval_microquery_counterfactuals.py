@@ -33,6 +33,28 @@ from scripts.train_microquery_end2end import (
 )
 
 
+COUNTERFACTUAL_EFFECT_MARGIN = 0.005
+COUNTERFACTUAL_METRICS = ("selected_global_iou", "selected_mean_niou", "selected_mask_auprc")
+
+
+def counterfactual_effect(correct: dict, intervention: dict, margin: float = COUNTERFACTUAL_EFFECT_MARGIN) -> dict:
+    """Require a visible segmentation effect, not a floating-point ordering accident."""
+
+    deltas = {
+        metric.removeprefix("selected_"): float(correct[metric]) - float(intervention[metric])
+        for metric in COUNTERFACTUAL_METRICS
+    }
+    ordering_pass = all(value > 0.0 for value in deltas.values())
+    return {
+        "condition": intervention["condition"],
+        "deltas_correct_minus_intervention": deltas,
+        "max_segmentation_delta": max(deltas.values()),
+        "ordering_pass": ordering_pass,
+        "effect_margin": margin,
+        "meaningful_effect_pass": ordering_pass and max(deltas.values()) >= margin,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
@@ -190,22 +212,23 @@ def main() -> None:
     lookup = {(row["family"], row["condition"]): row for row in metric_rows}
     correct = lookup[("baseline", "correct")]
     if variant == "f1_soft_gate":
-        mechanism = all(
-            float(correct["selected_global_iou"])
-            > float(lookup[("gate", name)]["selected_global_iou"])
+        mechanism_rows = [
+            counterfactual_effect(correct, lookup[("gate", name)])
             for name in ("all_one", "batch_shuffled", "candidate_shuffled", "inverted")
-        )
+        ]
     else:
-        mechanism = all(
-            float(correct["selected_global_iou"])
-            > float(lookup[("token", name)]["selected_global_iou"])
+        mechanism_rows = [
+            counterfactual_effect(correct, lookup[("token", name)])
             for name in ("zero", "batch_shuffled", "candidate_shuffled")
-        )
-    coordinate_mechanism = all(
-        float(correct["selected_global_iou"])
-        > float(lookup[("coordinate", name)]["selected_global_iou"])
+        ]
+    coordinate_rows = [
+        counterfactual_effect(correct, lookup[("coordinate", name)])
         for name in ("candidate_shuffled", "invalid", "random_background")
-    )
+    ]
+    mechanism_ordering = all(row["ordering_pass"] for row in mechanism_rows)
+    mechanism = all(row["meaningful_effect_pass"] for row in mechanism_rows)
+    coordinate_ordering = all(row["ordering_pass"] for row in coordinate_rows)
+    coordinate_mechanism = all(row["meaningful_effect_pass"] for row in coordinate_rows)
     summary = {
         "schema_version": 1,
         "variant": variant,
@@ -214,8 +237,14 @@ def main() -> None:
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "main_selected_threshold": threshold,
+        "counterfactual_effect_margin": COUNTERFACTUAL_EFFECT_MARGIN,
+        "counterfactual_effect_rule": "For every required intervention, correct must improve all of global IoU, mean nIoU, and mask AUPRC, with at least one improvement >=0.005 at the shared validation-selected threshold.",
+        "mechanism_counterfactual_ordering_pass": mechanism_ordering,
         "mechanism_counterfactual_pass": mechanism,
+        "mechanism_counterfactual_effects": mechanism_rows,
+        "coordinate_counterfactual_ordering_pass": coordinate_ordering,
         "coordinate_counterfactual_pass": coordinate_mechanism,
+        "coordinate_counterfactual_effects": coordinate_rows,
         "random_background_note": "GT is used only by this offline diagnostic to construct background-coordinate interventions; forward receives coordinates only.",
         "conditions": json_safe(metric_rows),
     }
