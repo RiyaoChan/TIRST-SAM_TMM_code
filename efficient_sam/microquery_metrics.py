@@ -320,6 +320,8 @@ class MicroQueryMetricAccumulator:
                 "rejected_duplicate_queries": duplicate_queries - accepted_duplicates,
                 "false_query_mask_pixels": false_query_pixels,
                 "final_false_pixels": final_false_pixels,
+                "intersection_pixels": intersection,
+                "union_pixels": union,
                 "iou": image_iou,
                 "f1": image_f1,
                 "pixels": int(gt.size),
