@@ -165,11 +165,50 @@ def candidate_diagnostics(cache: dict, variant: str, threshold: float):
             threshold=threshold,
         )
     result = accumulator.finalize()
+    image_index = {str(name): index for index, name in enumerate(cache["names"])}
+    primary_by_component: dict[tuple[str, int], int] = {}
+    for row in result["per_query_rows"]:
+        if str(row["assignment"]) == "primary":
+            primary_by_component[(str(row["image"]), int(row["component_index"]))] = int(
+                row["candidate_rank"]
+            ) - 1
+    duplicate_overlap = []
+    for row in result["per_query_rows"]:
+        row["duplicate_primary_mask_iou"] = None
+        if str(row["assignment"]) != "duplicate":
+            continue
+        key = (str(row["image"]), int(row["component_index"]))
+        if key not in primary_by_component:
+            continue
+        index = image_index[key[0]]
+        duplicate_index = int(row["candidate_rank"]) - 1
+        primary_index = primary_by_component[key]
+        query = cache["query_probability"][index].astype(np.float32)
+        if variant == "c0_one_query":
+            query = np.repeat(query[:1], 10, axis=0)
+        first = query[duplicate_index] >= float(threshold)
+        second = query[primary_index] >= float(threshold)
+        union = int(np.logical_or(first, second).sum())
+        overlap = int(np.logical_and(first, second).sum()) / union if union else 1.0
+        row["duplicate_primary_mask_iou"] = float(overlap)
+        duplicate_overlap.append(float(overlap))
     semantic = cache["semantic"] & cache["valid"]
     background = (~cache["semantic"]) & cache["valid"]
     gate = cache["gates"]
     result["summary"].update(
         {
+            "covered_component_count": int(
+                sum(int(row["covered_components"]) for row in result["per_image_rows"])
+            ),
+            "covered_detected_count": int(
+                sum(int(row["covered_detected"]) for row in result["per_image_rows"])
+            ),
+            "uncovered_incidental_detection_count": int(
+                sum(int(row["uncovered_detected"]) for row in result["per_image_rows"])
+            ),
+            "background_query_false_mask_pixels": int(
+                sum(int(row["false_query_mask_pixels"]) for row in result["per_image_rows"])
+            ),
             "gate_tcr_at_0_3": float((gate[semantic] >= 0.3).mean()) if semantic.any() else float("nan"),
             "gate_tcr_at_0_5": float((gate[semantic] >= 0.5).mean()) if semantic.any() else float("nan"),
             "gate_fcrr_at_0_3": float((gate[background] < 0.3).mean()) if background.any() else float("nan"),
@@ -177,6 +216,9 @@ def candidate_diagnostics(cache: dict, variant: str, threshold: float):
             "c0_query_metric_note": (
                 "not applicable: repeated shared one-query mask for file-shape compatibility"
                 if variant == "c0_one_query" else None
+            ),
+            "duplicate_query_mask_overlap": (
+                float(np.mean(duplicate_overlap)) if duplicate_overlap else float("nan")
             ),
         }
     )
