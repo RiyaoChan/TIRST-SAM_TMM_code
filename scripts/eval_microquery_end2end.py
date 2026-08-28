@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from efficient_sam.microquery import extract_candidate_roi_features
 from efficient_sam.microquery_end2end import EndToEndMicroQueryHead
+from efficient_sam.microquery_gate_deployment import GateDeploymentConfig
 from efficient_sam.microquery_metrics import MicroQueryMetricAccumulator
 from scripts.microquery_end2end_dataset import MicroQueryEndToEndDataset
 from scripts.microquery_end2end_metrics import FullMaskMetricAccumulator
@@ -108,7 +109,16 @@ def collect_predictions(model, head, variant, checkpoint_epoch, loader, device, 
         supervision = {key: value.to(device) for key, value in batch["supervision"].items()}
         with autocast_context(device, args.amp_dtype):
             output = forward_deployable(
-                model, head, deployable, variant=variant, epoch=checkpoint_epoch,
+                model,
+                head,
+                deployable,
+                variant=variant,
+                gate_deployment_config=(
+                    GateDeploymentConfig("all_one")
+                    if variant == "c1_independent_aux"
+                    else GateDeploymentConfig("legacy_checkpoint_schedule")
+                ),
+                checkpoint_epoch=checkpoint_epoch,
                 query_chunk=args.query_chunk,
             )
         rows["names"].extend(list(batch["meta"]["name"]))
@@ -308,7 +318,17 @@ def benchmark(model, head, variant, dataset, device, args, epoch: int) -> dict:
             torch.cuda.reset_peak_memory_stats(device)
         end_to_end_ms = elapsed(
             lambda: forward_deployable(
-                model, head, deployable, variant=variant, epoch=epoch, query_chunk=args.query_chunk
+                model,
+                head,
+                deployable,
+                variant=variant,
+                gate_deployment_config=(
+                    GateDeploymentConfig("all_one")
+                    if variant == "c1_independent_aux"
+                    else GateDeploymentConfig("legacy_checkpoint_schedule")
+                ),
+                checkpoint_epoch=epoch,
+                query_chunk=args.query_chunk,
             ),
             max(5, args.efficiency_repeats // 2),
         )

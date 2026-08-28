@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.eval_microquery_end2end import build_from_checkpoint, write_csv
+from efficient_sam.microquery_gate_deployment import GateDeploymentConfig
 from scripts.microquery_end2end_dataset import MicroQueryEndToEndDataset
 from scripts.microquery_end2end_metrics import FullMaskMetricAccumulator
 from scripts.microquery_end2end_runtime import forward_deployable
@@ -139,7 +140,12 @@ def evaluate_condition(
                 head,
                 deployable,
                 variant=variant,
-                epoch=epoch,
+                gate_deployment_config=(
+                    GateDeploymentConfig("all_one")
+                    if variant == "c1_independent_aux"
+                    else GateDeploymentConfig("legacy_checkpoint_schedule")
+                ),
+                checkpoint_epoch=epoch,
                 query_chunk=args.query_chunk,
                 gate_condition=gate_condition,
                 token_condition=token_condition,

@@ -12,6 +12,10 @@ import torch.nn.functional as F
 
 from efficient_sam.efficient_sam_hq import build_efficient_sam_hq
 from efficient_sam.microquery import extract_candidate_roi_features
+from efficient_sam.microquery_gate_deployment import (
+    GateDeploymentConfig,
+    compute_deployment_gate,
+)
 from efficient_sam.microquery_end2end import (
     EndToEndMicroQueryHead,
     aggregate_soft_gated_max,
@@ -170,13 +174,16 @@ def forward_deployable(
     deployable: dict[str, torch.Tensor],
     *,
     variant: str,
-    epoch: int,
+    training_epoch: Optional[int] = None,
+    gate_deployment_config: Optional[GateDeploymentConfig] = None,
+    checkpoint_epoch: Optional[int] = None,
     query_chunk: int = 5,
     gate_condition: str = "correct",
     token_condition: str = "correct",
     coordinate_condition: str = "correct",
     coordinate_override: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
+    image_embeddings: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
 ) -> FullForwardOutput:
     """Forward without any GT/mask/assignment argument."""
 
@@ -201,7 +208,14 @@ def forward_deployable(
         point_xy[..., 1] *= float(height - 1)
     elif coordinate_condition != "correct":
         raise ValueError(f"unknown coordinate condition: {coordinate_condition}")
-    neck, interm, shallow = encode_frozen_image(model, images)
+    if image_embeddings is None:
+        neck, interm, shallow = encode_frozen_image(model, images)
+    else:
+        if len(image_embeddings) != 3:
+            raise ValueError("image_embeddings must contain neck, intermediate and shallow tensors")
+        neck, interm, shallow = image_embeddings
+        if neck.shape[0] != images.shape[0] or interm.shape[0] != images.shape[0] or shallow.shape[0] != images.shape[0]:
+            raise ValueError("image_embeddings batch dimension must match deployable image")
     labels = torch.where(
         point_valid,
         torch.ones_like(point_valid, dtype=torch.long),
@@ -237,12 +251,28 @@ def forward_deployable(
         input_w=width,
     ).detach()
     head_output = head(descriptors, valid)
-    raw_gate, effective_gate, rho, temperature = soft_gate_schedule(
-        head_output.object_logits,
-        valid,
-        epoch,
-        force_all_one=variant == "c1_independent_aux",
-    )
+    if model.training:
+        if training_epoch is None:
+            raise ValueError("training forward requires explicit training_epoch")
+        if gate_deployment_config is not None or checkpoint_epoch is not None:
+            raise ValueError("training forward cannot consume a deployment gate configuration")
+        raw_gate, effective_gate, rho, temperature = soft_gate_schedule(
+            head_output.object_logits,
+            valid,
+            training_epoch,
+            force_all_one=variant == "c1_independent_aux",
+        )
+    else:
+        if training_epoch is not None:
+            raise ValueError("evaluation forward cannot consume training_epoch")
+        if gate_deployment_config is None:
+            raise ValueError("evaluation forward requires explicit gate_deployment_config")
+        raw_gate, effective_gate, rho, temperature = compute_deployment_gate(
+            head_output.object_logits,
+            valid,
+            gate_deployment_config,
+            checkpoint_epoch=checkpoint_epoch,
+        )
     if gate_condition == "all_one":
         effective_gate = valid.to(raw_gate.dtype)
     elif gate_condition == "zero":
