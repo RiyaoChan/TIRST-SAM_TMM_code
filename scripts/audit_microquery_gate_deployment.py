@@ -46,7 +46,7 @@ from scripts.eval_microquery_end2end import (
     write_csv,
 )
 from scripts.microquery_end2end_dataset import MicroQueryEndToEndDataset
-from scripts.microquery_end2end_runtime import forward_deployable
+from scripts.microquery_end2end_runtime import encode_frozen_image, forward_deployable
 from scripts.train_microquery_end2end import (
     DEFAULT_A1,
     DEFAULT_DATA_ROOT,
@@ -144,9 +144,17 @@ def collect_base(model, head, variant, epoch, loader, device, args) -> dict:
         "semantic": [],
         "component_ids": [],
     }
+    probability_by_config: dict[str, list[np.ndarray]] = {}
+    raw_gate_by_config: dict[str, list[np.ndarray]] = {}
+    effective_gate_by_config: dict[str, list[np.ndarray]] = {}
     for batch in loader:
         deployable = {key: value.to(device) for key, value in batch["deployable"].items()}
         supervision = {key: value.to(device) for key, value in batch["supervision"].items()}
+        # The frozen probe cache was generated from a float32 encoder pass.  Keep
+        # that single shared online encoder representation and autocast only the
+        # downstream MicroQuery/SAM path so cache and online deployment are the
+        # same computation rather than two different AMP protocols.
+        encoded = encode_frozen_image(model, deployable["image"])
         with autocast_context(device, args.amp_dtype):
             output = forward_deployable(
                 model,
@@ -155,12 +163,13 @@ def collect_base(model, head, variant, epoch, loader, device, args) -> dict:
                 variant=variant,
                 gate_deployment_config=GateDeploymentConfig("all_one"),
                 query_chunk=args.query_chunk,
+                image_embeddings=encoded,
             )
         rows["names"].extend(list(batch["meta"]["name"]))
         rows["image"].append(deployable["image"][:, :1].detach().float().cpu().numpy().astype(np.float16))
         rows["all_one_probability"].append(output.final_probability.detach().float().cpu().numpy())
         rows["query_probability"].append(
-            torch.sigmoid(output.query_logits).detach().float().cpu().numpy().astype(np.float16)
+            torch.sigmoid(output.query_logits).detach().float().cpu().numpy()
         )
         rows["object_logits"].append(output.object_logits.detach().float().cpu().numpy())
         rows["gt"].append(supervision["full_mask"].cpu().numpy().astype(np.uint8))
@@ -169,29 +178,57 @@ def collect_base(model, head, variant, epoch, loader, device, args) -> dict:
         rows["valid"].append(deployable["candidate_valid"].cpu().numpy().astype(bool))
         rows["semantic"].append(supervision["semantic_labels"].cpu().numpy().astype(bool))
         rows["component_ids"].append(supervision["component_ids"].cpu().numpy())
-    return {
+        for spec in condition_specs():
+            config_key = gate_config_id(
+                spec.config,
+                checkpoint_epoch=epoch if spec.legacy else None,
+            )
+            raw_gate, effective_gate, _, _ = compute_deployment_gate(
+                output.object_logits,
+                deployable["candidate_valid"],
+                spec.config,
+                checkpoint_epoch=epoch if spec.legacy else None,
+            )
+            if spec.config.mode == "all_one":
+                probability = output.final_probability
+            else:
+                probability = (
+                    torch.sigmoid(output.query_logits)
+                    * effective_gate[..., None, None]
+                ).amax(dim=1)
+            probability_by_config.setdefault(config_key, []).append(
+                probability.detach().float().cpu().numpy()
+            )
+            raw_gate_by_config.setdefault(config_key, []).append(
+                raw_gate.detach().float().cpu().numpy()
+            )
+            effective_gate_by_config.setdefault(config_key, []).append(
+                effective_gate.detach().float().cpu().numpy()
+            )
+    base = {
         key: (np.asarray(value) if key == "names" else np.concatenate(value, axis=0))
         for key, value in rows.items()
     }
+    base["probability_by_config"] = {
+        key: np.concatenate(value, axis=0) for key, value in probability_by_config.items()
+    }
+    base["raw_gate_by_config"] = {
+        key: np.concatenate(value, axis=0) for key, value in raw_gate_by_config.items()
+    }
+    base["effective_gate_by_config"] = {
+        key: np.concatenate(value, axis=0) for key, value in effective_gate_by_config.items()
+    }
+    return base
 
 
 def cache_for_condition(base: dict, config: GateDeploymentConfig, checkpoint_epoch: int) -> dict:
-    logits = torch.from_numpy(base["object_logits"])
-    valid = torch.from_numpy(base["valid"])
-    raw, effective, rho, temperature = compute_deployment_gate(
-        logits,
-        valid,
-        config,
-        checkpoint_epoch=checkpoint_epoch if config.mode == "legacy_checkpoint_schedule" else None,
-    )
-    if config.mode == "all_one":
-        probability = base["all_one_probability"].copy()
-    else:
-        query = base["query_probability"].astype(np.float32)
-        probability = np.max(query * effective.numpy()[..., None, None], axis=1).astype(np.float32)
+    legacy_epoch = checkpoint_epoch if config.mode == "legacy_checkpoint_schedule" else None
+    config_key = gate_config_id(config, checkpoint_epoch=legacy_epoch)
+    rho, temperature = resolve_gate_parameters(config, checkpoint_epoch=legacy_epoch)
     return {
         "names": base["names"],
-        "probability": probability,
+        "image": base["image"],
+        "probability": base["probability_by_config"][config_key],
         "query_probability": base["query_probability"],
         "gt": base["gt"],
         "xy": base["xy"],
@@ -199,8 +236,8 @@ def cache_for_condition(base: dict, config: GateDeploymentConfig, checkpoint_epo
         "valid": base["valid"],
         "semantic": base["semantic"],
         "component_ids": base["component_ids"],
-        "gates": effective.numpy().astype(np.float32),
-        "raw_gates": raw.numpy().astype(np.float32),
+        "gates": base["effective_gate_by_config"][config_key],
+        "raw_gates": base["raw_gate_by_config"][config_key],
         "rho": rho,
         "temperature": temperature,
     }
@@ -326,13 +363,22 @@ def gate_distribution(cache: dict, per_query_rows: Sequence[dict]) -> list[dict]
     query_gate = np.asarray([float(row["object_score"]) for row in per_query_rows])
     query_iou = np.asarray([float(row["best_query_iou"]) for row in per_query_rows])
     false_pixels = np.asarray([float(row["false_mask_pixels"]) for row in per_query_rows])
+    gate_constant = query_gate.size == 0 or np.allclose(query_gate, query_gate[0])
+    iou_constant = query_iou.size == 0 or np.allclose(query_iou, query_iou[0])
+    false_constant = false_pixels.size == 0 or np.allclose(false_pixels, false_pixels[0])
     output.append(
         {
             "gate": "effective",
             "group": "correlation",
             "count": int(query_gate.size),
-            "spearman_best_query_iou": float(spearmanr(query_gate, query_iou).statistic),
-            "spearman_false_mask_pixels": float(spearmanr(query_gate, false_pixels).statistic),
+            "spearman_best_query_iou": (
+                float("nan") if gate_constant or iou_constant
+                else float(spearmanr(query_gate, query_iou).statistic)
+            ),
+            "spearman_false_mask_pixels": (
+                float("nan") if gate_constant or false_constant
+                else float(spearmanr(query_gate, false_pixels).statistic)
+            ),
         }
     )
     return output
@@ -599,6 +645,8 @@ def counterfactual_rows(result: dict, threshold: float) -> list[dict]:
 
 def export_cases(results: dict[str, dict[str, dict]], selected_id: str, output_dir: Path) -> list[dict]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_panel in output_dir.glob("*.png"):
+        stale_panel.unlink()
     c1_a0 = results["C1"]["A0"]
     c1_gate = results["C1"][selected_id]
     f1_a0 = results["F1"]["A0"]

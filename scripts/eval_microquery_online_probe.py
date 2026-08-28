@@ -150,31 +150,33 @@ def benchmark_online_chain(model, head, variant, generator, sample, gate_config,
     deployable = proposal_to_deployable(images, proposal)
 
     def decode():
-        return forward_deployable(
-            model,
-            head,
-            deployable,
-            variant=variant,
-            gate_deployment_config=gate_config,
-            query_chunk=args.query_chunk,
-            image_embeddings=encoded,
-        )
+        with autocast_context(device, args.amp_dtype):
+            return forward_deployable(
+                model,
+                head,
+                deployable,
+                variant=variant,
+                gate_deployment_config=gate_config,
+                query_chunk=args.query_chunk,
+                image_embeddings=encoded,
+            )
 
     def total():
         current_encoded = encode()
         current_proposal = generator(images, current_encoded[0], [current_encoded[2]])
         current_deployable = proposal_to_deployable(images, current_proposal)
-        return forward_deployable(
-            model,
-            head,
-            current_deployable,
-            variant=variant,
-            gate_deployment_config=gate_config,
-            query_chunk=args.query_chunk,
-            image_embeddings=current_encoded,
-        )
+        with autocast_context(device, args.amp_dtype):
+            return forward_deployable(
+                model,
+                head,
+                current_deployable,
+                variant=variant,
+                gate_deployment_config=gate_config,
+                query_chunk=args.query_chunk,
+                image_embeddings=current_encoded,
+            )
 
-    with torch.inference_mode(), autocast_context(device, args.amp_dtype):
+    with torch.inference_mode():
         encoder_ms = elapsed(encode, args.repeats)
         probe_ms = elapsed(propose, args.repeats)
         microquery_decoder_ms = elapsed(decode, args.repeats)
@@ -311,6 +313,23 @@ def main() -> None:
                 "covered_components": coverage_hit,
             }
         )
+        offline_reference = {
+            "global_iou": float(matrix_row["matched_pd_global_iou"]),
+            "mean_niou": float(matrix_row["matched_pd_mean_niou"]),
+            "f1": float(matrix_row["matched_pd_f1"]),
+            "pd": float(matrix_row["matched_pd_pd"]),
+            "fa": float(matrix_row["matched_pd_fa_per_million"]) / 1e6,
+        }
+        offline_difference = {
+            key: float(metrics[key]) - value for key, value in offline_reference.items()
+        }
+        if any(abs(value) > 1e-12 for value in offline_difference.values()):
+            raise RuntimeError(
+                f"{model_id} online final metrics differ from the frozen offline audit: "
+                f"{offline_difference}"
+            )
+        metrics["offline_reference"] = offline_reference
+        metrics["online_minus_offline"] = offline_difference
         model_results.append(metrics)
         if model_id == "C1":
             latency = benchmark_online_chain(model, head, variant, generator, dataset[0], gate_config, device, args)
@@ -336,6 +355,16 @@ def main() -> None:
     )
     dump_json(output_dir / "candidate_replay_summary.json", replay)
     dump_json(output_dir / "online_final_metrics.json", model_results)
+    dump_json(
+        output_dir / "offline_online_equivalence.json",
+        {
+            row["model"]: {
+                "offline_reference": row["offline_reference"],
+                "online_minus_offline": row["online_minus_offline"],
+            }
+            for row in model_results
+        },
+    )
     write_csv(output_dir / "per_image_coverage.csv", online_rows)
     print(json.dumps(json_safe({"replay": replay, "metrics": model_results}), ensure_ascii=False, indent=2))
 
