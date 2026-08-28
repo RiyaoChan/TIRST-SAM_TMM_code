@@ -23,6 +23,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from efficient_sam.microquery_end2end import EndToEndMicroQueryHead, microquery_full_loss
+from efficient_sam.microquery_gate_deployment import GateDeploymentConfig
 from scripts.microquery_end2end_dataset import (
     MicroQueryEndToEndDataset,
     candidate_class_weights,
@@ -265,7 +266,12 @@ def validate(model, head, loader, device, args, epoch: int) -> tuple[dict, list[
                 head,
                 deployable,
                 variant=args.variant,
-                epoch=epoch,
+                gate_deployment_config=(
+                    GateDeploymentConfig("all_one")
+                    if args.variant == "c1_independent_aux"
+                    else GateDeploymentConfig("legacy_checkpoint_schedule")
+                ),
+                checkpoint_epoch=epoch,
                 query_chunk=args.query_chunk,
             )
         object_scores = output.raw_gates if output.object_logits is not None else None
@@ -451,7 +457,7 @@ def main() -> None:
                     head,
                     deployable,
                     variant=args.variant,
-                    epoch=epoch,
+                    training_epoch=epoch,
                     query_chunk=args.query_chunk,
                 )
             loss_arguments = {

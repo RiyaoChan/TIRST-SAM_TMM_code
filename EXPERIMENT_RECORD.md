@@ -398,3 +398,26 @@ C1 相对 C0 将 nIoU/CTR 分别提高 5.56/9.82pp，证明 independent-query �
 反事实审计将原计划中模糊的“明显优于”保守操作化为：correct 相对每个必需 intervention 的 global IoU、mean nIoU、mask AUPRC 均须更高，且至少一项提高 0.5pp。F1 correct 相对 all-one 的 mask AUPRC +3.44pp，且 batch/candidate shuffled 与 inverted 明显退化，因此 gate meaningful-effect 通过。F2 correct 相对 zero、batch-shuffled、candidate-shuffled 的最大增益仅 0.038/0.016/0.022pp，虽然 token LayerNorm/token-scale 梯度非零，token meaningful-effect 仍失败。
 
 按计划三级规则，本轮为 **Useful Partial Success（类型 A）**，winner 为 F1：soft gate 被最终 mask 消费并带来有限的 global-IoU/Fa 权衡改善，但证据混合、单种子且部分 CI 不支持稳定增益，不能称论文主模型。F2 candidate token 被拒绝。未进入 test、三随机种子或 NUDT；Partial 规则仅允许后续补一个 IRSTD seed 与一个 NUAA 单种子确认。完整配置、固定阈值表、2,000 次 paired bootstrap、反事实、效率和证据边界见 `docs/experiments/19_MICROQUERY_END2END_FULL_TRAINING.md`。
+
+## 十三、MicroQuery Gate 部署审计
+
+2026-08-28 已按 `experiments_guide/TIRST_SAM_MICROQUERY_GATE_DEPLOYMENT_AUDIT_PLAN_FOR_CODEX.md` 完成零训练部署审计。C1 epoch-18 与 F1 epoch-16 checkpoint、80 张 IRSTD-1k validation、117 个 components、K=10、candidate cache 和全部权重均冻结，test 未读取。训练 gate warm-up 与部署 gate 已从 API 层分离：训练态只能显式传 `training_epoch`，评测态 C1/F1/F2 必须显式传 `GateDeploymentConfig`；C1 可直接使用 predicted gate，不再由 variant 强制绑定 all-one，也不伪装成 F1。
+
+审计运行 C1/F1 各 7 个条件：A0 all-one、R0 raw、R1/R2 `T=1,ρ=0.1/0.2`、R3/R4 `T=1.5,ρ=0.1/0.2` 和 checkpoint legacy，共 14 个零训练条件；每个条件完成固定 0.5、checkpoint anchor、19 点 threshold sweep、matched-Pd/Fa、Pareto、面积分桶和 gate 分布。绝对 Pd floor 为 `105/117=89.7436%`。
+
+显式条件中平均 matched-Pd Fa 最低的是 R4 `residual(ρ=0.2,T=1.5)`，但它只是诊断 fallback，不是安全 winner：
+
+| Model | Gate | threshold | IoU | nIoU | F1 | Pd | Fa ×10^-6 | tiny-Pd | CTR |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| C1 | A0 matched-Pd | 0.95 | 56.74 | 51.70 | 64.40 | 89.74 | **27.47** | 81.36 | 93.75 |
+| C1 | R4 matched-Pd | 0.25 | 57.26 | **53.76** | **66.10** | 89.74 | 28.80 | **83.05** | 93.75 |
+| F1 | A0 matched-Pd | 0.30 | 58.09 | 51.86 | 64.34 | **91.45** | 33.38 | **84.75** | **95.54** |
+| F1 | R4 matched-Pd | 0.25 | **58.20** | **52.29** | **64.38** | 89.74 | **27.66** | 81.36 | 93.75 |
+
+F1-R4 的 Fa 相对 F1-A0 下降 17.14%，bootstrap 95% CI 为 `[-13.54,-0.76] ×10^-6`；但 Pd 下降 1.71pp，tiny-Pd 下降 3.39pp，即少检 2 个 1–9 px components，CTR 下降 1.79pp，违反“tiny 最多损失 1 个、CTR 下降≤0.85pp”。R1 也因 F1 CTR 下降 0.89pp 略超门槛而失败；R2–R4 均丢失 2 个 tiny components；R0 在 C1 上没有 matched-Pd 点。因此所有显式配置 `paper_safe=false`。
+
+R4 correct 相对 candidate/batch shuffled 与 inverted 大幅退化，证明 gate 内容确实被最终 aggregation 消费，但这个因果证据不等于安全收益。C1-R4 相对 C1-A0 的 nIoU/F1 bootstrap CI 为正，同时 Fa 没有改善；F1-R4 相对 C1-R4 的 F1 低 1.72pp，95% CI `[−3.82,−0.01]pp`。没有证据支持 gate training 稳定全面优于 C1 independent decoder。
+
+online probe replay 使用一次 float32 encoder 同时服务 neck probe 与 MicroQuery，随后下游 bfloat16；800 个 candidate slots 中 344 个 joint-valid，valid/坐标/排序/score 均 100% 或零误差，Coverage@10 为 112/117=95.73%，离线与在线最终指标逐项完全一致。batch=1、warm-up 10、重复 50 次的 end-to-end latency 为 44.47 ms/image，其中 encoder 15.09 ms、probe 2.28 ms、MicroQuery+10-query decoder 26.76 ms，只有一次 encoder 调用。
+
+最终按预注册规则判定为 **Gate Failure**：不启动 IRSTD 第二 seed 或 NUAA gate 训练，F2 永久停止；保留 C1 independent-query + per-query foreground/background supervision 与 all-one 部署。完整 14 条件表、2,000 次 bootstrap、面积分桶、反事实、7 类失败案例、在线重放和证据边界见 `docs/experiments/20_MICROQUERY_GATE_DEPLOYMENT_AUDIT.md`。全仓库测试为 **115 passed**。
